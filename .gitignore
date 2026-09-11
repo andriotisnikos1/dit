@@ -1,0 +1,32 @@
+# Binaries
+/dit
+/dit-server
+/bin/
+/dist/
+
+# Test artifacts
+*.test
+*.out
+coverage.*
+coverage.html
+
+# Local runtime data
+/data/
+*.db
+*.db-wal
+*.db-shm
+master.key
+
+# Secrets / local config
+.env
+.env.local
+*.key
+config.yaml
+config.yml
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
