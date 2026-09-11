@@ -69,6 +69,10 @@ type Engine struct {
 
 	now  func() time.Time
 	rand *rand.Rand
+	// randMu guards rand: a single *rand.Rand is not safe for concurrent use,
+	// and the worker pool computes next attempts from several goroutines at
+	// once.
+	randMu sync.Mutex
 
 	// Per-watch serialization.
 	locksMu sync.Mutex
@@ -155,7 +159,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		"timeout", e.timeout.String())
 
 	for {
-		delay := Jitter(e.interval, JitterFraction, e.rand.Float64())
+		delay := e.jittered(e.interval)
 		next := e.now().Add(delay)
 		e.nextTick.Store(&next)
 
@@ -335,10 +339,11 @@ func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, tri
 		return nil, err
 	}
 
-	// The baseline is the set of recorded tags, not the fact that a check ran:
-	// a pattern watch whose first checks all failed has no baseline yet and
-	// must record one instead of reporting every matching tag as new.
-	outcome := DiffPattern(watch.Ref, listed, known, len(known) == 0)
+	// The baseline is tracked explicitly: a pattern watch created before any
+	// matching tag exists legitimately records an empty tag set, and inferring
+	// "baseline" from that set being non-empty would re-baseline forever and
+	// never report the first tags to appear.
+	outcome := DiffPattern(watch.Ref, listed, known, !watch.HasBaseline())
 	result.Matched = len(outcome.Matched)
 	result.Baseline = outcome.Baseline
 
@@ -494,8 +499,16 @@ func (e *Engine) emitRecovered(ctx context.Context, watch *store.WatchRecord) {
 
 // nextAttempt schedules the next check one (jittered) interval from now.
 func (e *Engine) nextAttempt() time.Time {
-	delay := Jitter(e.interval, JitterFraction, e.rand.Float64())
-	return e.now().Add(delay)
+	return e.now().Add(e.jittered(e.interval))
+}
+
+// jittered spreads a duration by ±JitterFraction using the engine's jitter
+// source, which is serialized because several workers call this at once.
+func (e *Engine) jittered(d time.Duration) time.Duration {
+	e.randMu.Lock()
+	frac := e.rand.Float64()
+	e.randMu.Unlock()
+	return Jitter(d, JitterFraction, frac)
 }
 
 // lockWatch returns a function that releases the per-watch lock.

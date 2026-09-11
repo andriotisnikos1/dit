@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
 )
@@ -24,8 +25,11 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if _, ok := applied["0001_init"]; !ok {
 		t.Errorf("0001_init not recorded as applied; got %v", applied)
 	}
-	if len(applied) != 1 {
-		t.Errorf("applied migrations = %d, want 1", len(applied))
+	if _, ok := applied["0002_baseline_at"]; !ok {
+		t.Errorf("0002_baseline_at not recorded as applied; got %v", applied)
+	}
+	if len(applied) != 2 {
+		t.Errorf("applied migrations = %d, want 2", len(applied))
 	}
 
 	// The schema must be usable after the re-run.
@@ -382,6 +386,71 @@ func TestMarkWatchSuccessResetsFailures(t *testing.T) {
 	}
 	if recovered.LastDigest != "sha256:new" {
 		t.Errorf("LastDigest = %q, want sha256:new", recovered.LastDigest)
+	}
+}
+
+func TestMarkWatchSuccessRecordsBaselineOnce(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	watch := mustCreateWatch(t, db, "ghcr.io", "owner/app", "v1", nil)
+	if watch.HasBaseline() {
+		t.Error("a brand new watch must not report a baseline")
+	}
+
+	// The first success stamps the baseline.
+	if err := db.MarkWatchSuccess(ctx, watch.ID, "sha256:first", nowUTC()); err != nil {
+		t.Fatalf("MarkWatchSuccess: %v", err)
+	}
+	first, err := db.GetWatch(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if !first.HasBaseline() {
+		t.Fatal("HasBaseline = false after the first success")
+	}
+	stamp := *first.BaselineAt
+
+	// A later success must not move it: the baseline is when the watch started
+	// being comparable, not when it was last checked.
+	time.Sleep(2 * time.Millisecond)
+	if err := db.MarkWatchSuccess(ctx, watch.ID, "sha256:second", nowUTC()); err != nil {
+		t.Fatalf("second MarkWatchSuccess: %v", err)
+	}
+	second, err := db.GetWatch(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if second.BaselineAt == nil || !second.BaselineAt.Equal(stamp) {
+		t.Errorf("BaselineAt moved from %s to %v; it must be stamped once", stamp, second.BaselineAt)
+	}
+	if second.LastDigest != "sha256:second" {
+		t.Errorf("LastDigest = %q, want sha256:second", second.LastDigest)
+	}
+
+	// A failure keeps the baseline, so a recovery diffs rather than re-baselines.
+	if err := db.MarkWatchFailure(ctx, watch.ID, "boom", nowUTC()); err != nil {
+		t.Fatalf("MarkWatchFailure: %v", err)
+	}
+	failed, err := db.GetWatch(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if !failed.HasBaseline() {
+		t.Error("HasBaseline = false after a failure: the baseline must survive an outage")
+	}
+
+	// A watch that only ever failed has no baseline.
+	fresh := mustCreateWatch(t, db, "ghcr.io", "owner/other", "v1", nil)
+	if err := db.MarkWatchFailure(ctx, fresh.ID, "boom", nowUTC()); err != nil {
+		t.Fatalf("MarkWatchFailure: %v", err)
+	}
+	stillFresh, err := db.GetWatch(ctx, fresh.ID)
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if stillFresh.HasBaseline() {
+		t.Error("HasBaseline = true for a watch whose every check failed")
 	}
 }
 

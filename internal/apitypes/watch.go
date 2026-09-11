@@ -26,6 +26,7 @@ type Watch struct {
 	LastDigest          string     `json:"last_digest,omitempty" yaml:"last_digest,omitempty"`
 	LastCheckedAt       *time.Time `json:"last_checked_at,omitempty" yaml:"last_checked_at,omitempty"`
 	LastOKAt            *time.Time `json:"last_ok_at,omitempty"  yaml:"last_ok_at,omitempty"`
+	BaselineAt          *time.Time `json:"baseline_at,omitempty" yaml:"baseline_at,omitempty"`
 	LastError           string     `json:"last_error,omitempty"  yaml:"last_error,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures"  yaml:"consecutive_failures"`
 	NextAttemptAt       *time.Time `json:"next_attempt_at,omitempty" yaml:"next_attempt_at,omitempty"`

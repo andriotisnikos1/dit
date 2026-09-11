@@ -25,6 +25,7 @@ type WatchRecord struct {
 	LastDigest          string
 	LastCheckedAt       *time.Time
 	LastOKAt            *time.Time
+	BaselineAt          *time.Time
 	LastError           string
 	ConsecutiveFailures int
 	NextAttemptAt       *time.Time
@@ -35,10 +36,15 @@ type WatchRecord struct {
 	ChannelIDs []string
 }
 
-// HasBaseline reports whether a baseline digest has been recorded. A watch
-// whose first checks all failed has no baseline, so its first *successful*
-// check must record one rather than report a change from nothing.
-func (w *WatchRecord) HasBaseline() bool { return w.LastDigest != "" }
+// HasBaseline reports whether the watch has completed at least one successful
+// check, which is what makes the next check a diff rather than a baseline.
+//
+// This is tracked explicitly rather than inferred from the data a check
+// produced: a pattern watch created before any matching tag exists legitimately
+// produces an empty tag set, and a tag watch whose early checks all failed has
+// no digest yet. In both cases the first *successful* check is the baseline and
+// must stay silent.
+func (w *WatchRecord) HasBaseline() bool { return w.BaselineAt != nil }
 
 // CreateWatchInput is the input to CreateWatch.
 type CreateWatchInput struct {
@@ -72,8 +78,8 @@ type WatchFilter struct {
 }
 
 const watchColumns = `id, image, registry, repository, kind, ref, enabled,
-	notify_on_failure, last_digest, last_checked_at, last_ok_at, last_error,
-	consecutive_failures, next_attempt_at, created_at, updated_at`
+	notify_on_failure, last_digest, last_checked_at, last_ok_at, baseline_at,
+	last_error, consecutive_failures, next_attempt_at, created_at, updated_at`
 
 // CreateWatch inserts a watch and its channel subscriptions atomically. It
 // returns ErrDuplicate when an identical (registry, repository, kind, ref)
@@ -269,14 +275,19 @@ func (db *DB) DeleteWatch(ctx context.Context, id string) error {
 }
 
 // MarkWatchSuccess records a healthy check result and schedules the next one.
+//
+// baseline_at is set on the first success only, so it is the durable record of
+// "this watch has a baseline". COALESCE keeps it stable across later successes.
 func (db *DB) MarkWatchSuccess(ctx context.Context, id, digest string, next time.Time) error {
 	now := time.Now().UTC()
 	res, err := db.db.ExecContext(ctx, `
 		UPDATE watches
-		SET last_digest = ?, last_checked_at = ?, last_ok_at = ?, last_error = '',
-		    consecutive_failures = 0, next_attempt_at = ?, updated_at = ?
+		SET last_digest = ?, last_checked_at = ?, last_ok_at = ?,
+		    baseline_at = COALESCE(baseline_at, ?),
+		    last_error = '', consecutive_failures = 0, next_attempt_at = ?, updated_at = ?
 		WHERE id = ?`,
-		digest, formatTime(now), formatTime(now), formatTime(next), formatTime(now), id)
+		digest, formatTime(now), formatTime(now), formatTime(now),
+		formatTime(next), formatTime(now), id)
 	if err != nil {
 		return fmt.Errorf("store: mark watch success: %w", err)
 	}
@@ -512,14 +523,15 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanWatch(s scanner) (*WatchRecord, error) {
 	var (
-		w                            WatchRecord
-		kind                         string
-		enabled, notifyOnFailure     int
-		lastChecked, lastOK, nextTry sql.NullString
-		createdAt, updatedAt         string
+		w                               WatchRecord
+		kind                            string
+		enabled, notifyOnFailure        int
+		lastChecked, lastOK, baselineAt sql.NullString
+		nextTry                         sql.NullString
+		createdAt, updatedAt            string
 	)
 	err := s.Scan(&w.ID, &w.Image, &w.Registry, &w.Repository, &kind, &w.Ref,
-		&enabled, &notifyOnFailure, &w.LastDigest, &lastChecked, &lastOK,
+		&enabled, &notifyOnFailure, &w.LastDigest, &lastChecked, &lastOK, &baselineAt,
 		&w.LastError, &w.ConsecutiveFailures, &nextTry, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, translateErr(err)
@@ -531,6 +543,9 @@ func scanWatch(s scanner) (*WatchRecord, error) {
 		return nil, err
 	}
 	if w.LastOKAt, err = timePtr(lastOK); err != nil {
+		return nil, err
+	}
+	if w.BaselineAt, err = timePtr(baselineAt); err != nil {
 		return nil, err
 	}
 	if w.NextAttemptAt, err = timePtr(nextTry); err != nil {

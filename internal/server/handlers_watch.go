@@ -396,6 +396,7 @@ func (s *Server) toAPIWatch(w *store.WatchRecord) apitypes.Watch {
 		LastDigest:          w.LastDigest,
 		LastCheckedAt:       w.LastCheckedAt,
 		LastOKAt:            w.LastOKAt,
+		BaselineAt:          w.BaselineAt,
 		LastError:           w.LastError,
 		ConsecutiveFailures: w.ConsecutiveFailures,
 		NextAttemptAt:       w.NextAttemptAt,
