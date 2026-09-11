@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
@@ -46,7 +47,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleListEvents serves the global event feed.
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
-	s.listEvents(w, r, "")
+	// The global feed takes the watch from the query string, which is what
+	// `dit events --watch <id>` sends; the per-watch endpoint takes it from
+	// the path. Both funnel into the same listing.
+	s.listEvents(w, r, pathValue(r, "id"), r.URL.Query().Get("watch"))
 }
 
 // handleWatchEvents serves the per-watch history.
@@ -56,13 +60,27 @@ func (s *Server) handleWatchEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, apitypes.NewError(apitypes.CodeBadRequest, "watch id is required"), s.log)
 		return
 	}
-	s.listEvents(w, r, id)
+	s.listEvents(w, r, id, "")
 }
 
-// listEvents is the shared implementation of the two event endpoints.
-func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, watchID string) {
+// listEvents is the shared implementation of the two event endpoints. The
+// watch ID may arrive from either the path or the query, so both parameters
+// are accepted and a conflict is rejected rather than silently resolved.
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, pathWatchID, queryWatchID string) {
 	ctx, cancel := s.context(r)
 	defer cancel()
+
+	pathWatchID = strings.TrimSpace(pathWatchID)
+	queryWatchID = strings.TrimSpace(queryWatchID)
+	if pathWatchID != "" && queryWatchID != "" && pathWatchID != queryWatchID {
+		writeError(w, r, apitypes.NewError(apitypes.CodeBadRequest,
+			"the watch in the path and the watch in the query string disagree"), s.log)
+		return
+	}
+	watchID := pathWatchID
+	if watchID == "" {
+		watchID = queryWatchID
+	}
 
 	limit, offset, err := pagination(r)
 	if err != nil {
