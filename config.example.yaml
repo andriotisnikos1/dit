@@ -1,0 +1,34 @@
+# Example dit-server configuration.
+#
+# Every key here can also be supplied through the environment; environment
+# variables win over this file. See .env.example for the full list.
+
+listen: ":8080"
+data_dir: "./data"
+# db_path and master_key_file default to <data_dir>/dit.db and
+# <data_dir>/master.key when left unset.
+# db_path: "./data/dit.db"
+# master_key_file: "./data/master.key"
+
+# public_url: "https://dit.example.com"
+
+# REQUIRED: prefer the environment (DIT_API_TOKEN) so the secret stays out of
+# the file. The server refuses to start without it.
+# api_token: "change-me"
+
+# REQUIRED unless master_key_file exists: base64 of 32 random bytes.
+# master_key: "..."
+
+check_interval: 15m
+check_concurrency: 4
+check_timeout: 30s
+
+notify_attempts: 3
+notify_backoff: 5s
+
+log_level: info
+
+# Watches with no explicit subscription notify these channels. When empty, the
+# channels flagged is_default are used.
+# default_channels:
+#   - ops-ntfy
