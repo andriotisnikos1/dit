@@ -1,0 +1,33 @@
+services:
+  dit-server:
+    build:
+      context: .
+      args:
+        VERSION: ${DIT_VERSION:-dev}
+        COMMIT: ${DIT_COMMIT:-none}
+        DATE: ${DIT_DATE:-unknown}
+    image: dit-server:${DIT_VERSION:-dev}
+    container_name: dit-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DIT_DATA_DIR: /data
+      DIT_LISTEN: ":8080"
+    ports:
+      - "${DIT_PORT:-8080}:8080"
+    volumes:
+      - dit-data:/data
+    healthcheck:
+      # The image is distroless: there is no shell and no curl, so the health
+      # check is the binary itself probing its own /healthz endpoint.
+      test: ["CMD", "/dit-server", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  dit-data:
