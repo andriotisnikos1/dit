@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ---------- build ----------
 FROM golang:1.26-alpine AS build
 
@@ -38,7 +36,10 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/dit-server /dit-server
 
 # The database and the generated master key live here; mount a volume.
-VOLUME ["/data"]
+#
+# Deliberately NOT declared with VOLUME: the orchestrator attaches the volume
+# (Railway, or docker-compose's named volume), and a Dockerfile-declared VOLUME
+# on a path the platform bind-mounts makes the container fail to start.
 ENV DIT_DATA_DIR=/data
 ENV DIT_LISTEN=:8080
 
