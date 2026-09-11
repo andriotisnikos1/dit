@@ -23,6 +23,7 @@ type stubAPI struct {
 	watchEventsFn   func(context.Context, string, int) (apitypes.List[apitypes.Event], error)
 	eventsFn        func(context.Context, apiclient.EventQuery) (apitypes.List[apitypes.Event], error)
 	notificationsFn func(context.Context, int) (apitypes.List[apitypes.Notification], error)
+	retryFn         func(context.Context, string) (apitypes.NotificationRetryResult, error)
 
 	listChannelsFn   func(context.Context) (apitypes.List[apitypes.Channel], error)
 	createChannelFn  func(context.Context, apitypes.CreateChannelRequest) (apitypes.Channel, error)
@@ -129,6 +130,14 @@ func (s *stubAPI) Notifications(ctx context.Context, limit int) (apitypes.List[a
 		return apitypes.List[apitypes.Notification]{}, nil
 	}
 	return s.notificationsFn(ctx, limit)
+}
+
+func (s *stubAPI) RetryNotification(ctx context.Context, id string) (apitypes.NotificationRetryResult, error) {
+	s.record("retryNotification")
+	if s.retryFn == nil {
+		return apitypes.NotificationRetryResult{OK: true}, nil
+	}
+	return s.retryFn(ctx, id)
 }
 
 func (s *stubAPI) ListChannels(ctx context.Context) (apitypes.List[apitypes.Channel], error) {

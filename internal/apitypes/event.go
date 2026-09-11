@@ -47,6 +47,13 @@ type Event struct {
 	Notifications []Notification `json:"notifications,omitempty" yaml:"notifications,omitempty"`
 }
 
+// NotificationRetryResult reports the outcome of a retry.
+type NotificationRetryResult struct {
+	Notification Notification `json:"notification" yaml:"notification"`
+	OK           bool         `json:"ok"           yaml:"ok"`
+	Error        string       `json:"error,omitempty" yaml:"error,omitempty"`
+}
+
 // NotificationStatus tracks delivery of one event to one channel.
 type NotificationStatus string
 

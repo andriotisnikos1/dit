@@ -78,6 +78,7 @@ type API interface {
 
 	Events(ctx context.Context, q EventQuery) (apitypes.List[apitypes.Event], error)
 	Notifications(ctx context.Context, limit int) (apitypes.List[apitypes.Notification], error)
+	RetryNotification(ctx context.Context, id string) (apitypes.NotificationRetryResult, error)
 
 	ListChannels(ctx context.Context) (apitypes.List[apitypes.Channel], error)
 	CreateChannel(ctx context.Context, req apitypes.CreateChannelRequest) (apitypes.Channel, error)
@@ -222,6 +223,13 @@ func (c *Client) Notifications(ctx context.Context, limit int) (apitypes.List[ap
 		query.Set("limit", strconv.Itoa(limit))
 	}
 	err := c.do(ctx, http.MethodGet, "/api/v1/notifications", query, nil, &out, false)
+	return out, err
+}
+
+// RetryNotification re-delivers a recorded notification.
+func (c *Client) RetryNotification(ctx context.Context, id string) (apitypes.NotificationRetryResult, error) {
+	var out apitypes.NotificationRetryResult
+	err := c.do(ctx, http.MethodPost, "/api/v1/notifications/"+url.PathEscape(id)+"/retry", nil, nil, &out, false)
 	return out, err
 }
 

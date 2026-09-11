@@ -149,6 +149,7 @@ dit creds rm <registry>
 
 dit events [--limit N] [--watch <id>] [--type <type>]
 dit notifications [--limit N]
+dit notifications retry <id>
 ```
 
 `--tag` is repeatable and creates one watch per tag. Output defaults to aligned
@@ -177,6 +178,7 @@ in constant time. `GET /healthz` is unauthenticated.
 | GET | `/api/v1/registries` | Known registries + whether credentials are stored |
 | PUT/GET/DELETE | `/api/v1/registries/{host}/credentials` | Set / metadata-only read / delete |
 | GET | `/api/v1/notifications` | Delivery log |
+| POST | `/api/v1/notifications/{id}/retry` | Re-deliver a failed notification |
 
 Errors use one envelope:
 
@@ -217,6 +219,17 @@ Errors use one envelope:
   `check_recovered` on return to health, so a watch that stays broken does not
   spam the interval. Delivery of failure notifications is suppressed when
   `notify_on_failure` is false.
+- **Baselines** — a watch records its baseline on its first *successful* check,
+  tracked explicitly in `baseline_at`. Inferring it from the data a check
+  produced would be wrong twice over: a pattern watch created before any
+  matching tag exists legitimately records an empty tag set (and would
+  re-baseline forever, never reporting the first tags to appear), and a tag
+  watch whose early checks all failed has no digest yet (and would report a
+  phantom change from nothing).
+- **Delivery** — up to `notify_attempts` attempts with backoff, each recorded in
+  `notifications` (`pending` → `sent`/`failed`). A failed delivery never affects
+  the stored check result and can be re-sent with
+  `POST /api/v1/notifications/{id}/retry` or `dit notifications retry <id>`.
 
 Registry access goes through one interface, so tests substitute a fake:
 

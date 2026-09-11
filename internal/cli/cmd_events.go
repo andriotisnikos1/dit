@@ -69,25 +69,59 @@ func (a *App) newNotificationsCommand() *cobra.Command {
 				if o.Format != FormatTable {
 					return o.PrintJSON(list)
 				}
-				rows := make([][]string, 0, len(list.Items))
-				for _, n := range list.Items {
-					rows = append(rows, []string{
-						n.ID,
-						formatTime(&n.CreatedAt),
-						n.EventID,
-						n.ChannelName,
-						n.ChannelType,
-						string(n.Status),
-						fmt.Sprintf("%d", n.Attempts),
-						orDash(n.LastError),
-					})
-				}
-				return o.Table([]string{"ID", "WHEN", "EVENT", "CHANNEL", "TYPE", "STATUS", "TRIES", "ERROR"}, rows)
+				return writeNotificationTable(o, list.Items)
 			})
 		},
 	}
 	cmd.Flags().IntVar(&limit, "limit", 50, "maximum rows to show")
+	cmd.AddCommand(a.newNotificationsRetryCommand())
 	return cmd
+}
+
+func (a *App) newNotificationsRetryCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "retry <id>",
+		Short: "Re-deliver a failed notification",
+		Long: `Re-send a recorded notification through its channel without re-running the
+check. A notification that was already delivered is not retried.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := a.Context()
+			defer cancel()
+
+			result, err := a.Client.RetryNotification(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			return a.Out.Print(result, func(o *Output) error {
+				if o.Format != FormatTable {
+					return o.PrintJSON(result)
+				}
+				if !result.OK {
+					return fmt.Errorf("retry failed: %s", result.Error)
+				}
+				return o.Println("Re-delivered %s to %s (attempts: %d)",
+					result.Notification.ID, result.Notification.ChannelName, result.Notification.Attempts)
+			})
+		},
+	}
+}
+
+func writeNotificationTable(o *Output, notifications []apitypes.Notification) error {
+	rows := make([][]string, 0, len(notifications))
+	for _, n := range notifications {
+		rows = append(rows, []string{
+			n.ID,
+			formatTime(&n.CreatedAt),
+			n.EventID,
+			n.ChannelName,
+			n.ChannelType,
+			string(n.Status),
+			fmt.Sprintf("%d", n.Attempts),
+			orDash(n.LastError),
+		})
+	}
+	return o.Table([]string{"ID", "WHEN", "EVENT", "CHANNEL", "TYPE", "STATUS", "TRIES", "ERROR"}, rows)
 }
 
 func eventTypeNames() string {

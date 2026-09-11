@@ -131,6 +131,7 @@ func (s *Server) routes() http.Handler {
 	api("DELETE /api/v1/registries/{host}/credentials", s.handleDeleteCredentials)
 
 	api("GET /api/v1/notifications", s.handleListNotifications)
+	api("POST /api/v1/notifications/{id}/retry", s.handleRetryNotification)
 
 	// Anything else is a 404 in the standard envelope.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
