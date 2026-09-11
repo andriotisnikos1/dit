@@ -61,7 +61,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	}
 	if !req.Type.Valid() {
 		writeError(w, r, apitypes.Errorf(apitypes.CodeValidationFailed,
-			"channel type must be one of email, ntfy (got %q)", req.Type), s.log)
+			"channel type must be one of %s (got %q)", apitypes.ChannelTypeList(), req.Type), s.log)
 		return
 	}
 	if strings.TrimSpace(req.Name) == "" {

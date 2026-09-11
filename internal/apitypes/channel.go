@@ -1,17 +1,32 @@
 package apitypes
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ChannelType is the transport used by a notification channel.
 type ChannelType string
 
 const (
-	ChannelEmail ChannelType = "email"
-	ChannelNtfy  ChannelType = "ntfy"
+	ChannelEmail     ChannelType = "email"
+	ChannelEmailHTTP ChannelType = "email-http"
+	ChannelNtfy      ChannelType = "ntfy"
 )
 
 // ChannelTypes lists every supported channel type.
-func ChannelTypes() []ChannelType { return []ChannelType{ChannelEmail, ChannelNtfy} }
+func ChannelTypes() []ChannelType {
+	return []ChannelType{ChannelEmail, ChannelEmailHTTP, ChannelNtfy}
+}
+
+// ChannelTypeList renders ChannelTypes as a comma-separated list for messages.
+func ChannelTypeList() string {
+	names := make([]string, 0, len(ChannelTypes()))
+	for _, t := range ChannelTypes() {
+		names = append(names, string(t))
+	}
+	return strings.Join(names, ", ")
+}
 
 // Valid reports whether t is a known channel type.
 func (t ChannelType) Valid() bool {
@@ -39,6 +54,12 @@ const (
 	ConfigToken    = "token"
 	ConfigPriority = "priority"
 	ConfigTags     = "tags"
+
+	// Keys used by the email-http channel type.
+	ConfigProvider  = "provider"
+	ConfigAPIKey    = "api_key"
+	ConfigAccountID = "account_id"
+	ConfigFromName  = "from_name"
 )
 
 // Channel is the wire representation of a notification channel. Secrets in

@@ -28,8 +28,11 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if _, ok := applied["0002_baseline_at"]; !ok {
 		t.Errorf("0002_baseline_at not recorded as applied; got %v", applied)
 	}
-	if len(applied) != 2 {
-		t.Errorf("applied migrations = %d, want 2", len(applied))
+	if _, ok := applied["0003_channel_email_http"]; !ok {
+		t.Errorf("0003_channel_email_http not recorded as applied; got %v", applied)
+	}
+	if len(applied) != 3 {
+		t.Errorf("applied migrations = %d, want 3", len(applied))
 	}
 
 	// The schema must be usable after the re-run.

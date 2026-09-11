@@ -154,6 +154,8 @@ func Build(channelType string, cfg map[string]string) (Channel, error) {
 	switch apitypes.ChannelType(channelType) {
 	case apitypes.ChannelEmail:
 		return NewEmail(cfg)
+	case apitypes.ChannelEmailHTTP:
+		return NewEmailHTTP(cfg)
 	case apitypes.ChannelNtfy:
 		return NewNtfy(cfg)
 	default:

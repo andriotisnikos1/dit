@@ -12,7 +12,7 @@ import (
 
 // SecretConfigKeys are the channel config keys whose values are sealed at rest
 // and never returned by the API.
-var SecretConfigKeys = []string{apitypes.ConfigPassword, apitypes.ConfigToken}
+var SecretConfigKeys = []string{apitypes.ConfigPassword, apitypes.ConfigToken, apitypes.ConfigAPIKey}
 
 // ChannelRecord is the stored form of a channel, with secrets decrypted.
 // Callers must redact before exposing it over the API.

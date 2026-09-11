@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
+	"github.com/andriotisnikos1/dit/internal/notify"
 )
 
 func (a *App) newChannelCommand() *cobra.Command {
@@ -33,10 +34,14 @@ subscriptions notifies the channels flagged as default.`,
 func (a *App) newChannelAddCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <type>",
-		Short: "Add an email or ntfy channel",
+		Short: "Add an email, email-http or ntfy channel",
 		Args:  cobra.ExactArgs(1),
 	}
-	cmd.AddCommand(a.newChannelAddEmailCommand(), a.newChannelAddNtfyCommand())
+	cmd.AddCommand(
+		a.newChannelAddEmailCommand(),
+		a.newChannelAddEmailHTTPCommand(),
+		a.newChannelAddNtfyCommand(),
+	)
 	return cmd
 }
 
@@ -127,6 +132,112 @@ func (a *App) newChannelAddEmailCommand() *cobra.Command {
 	flags.StringVar(&username, "username", "", "SMTP username")
 	flags.BoolVar(&passwordIn, "password-stdin", false, "read the SMTP password from stdin")
 	return cmd
+}
+
+// newChannelAddEmailHTTPCommand adds a channel that sends through a
+// transactional email provider's HTTPS API.
+func (a *App) newChannelAddEmailHTTPCommand() *cobra.Command {
+	var (
+		name      string
+		provider  string
+		apiKeyIn  bool
+		from      string
+		fromName  string
+		to        []string
+		accountID string
+		baseURL   string
+	)
+	cmd := &cobra.Command{
+		Use:   "email-http",
+		Short: "Add a transactional email channel that sends over an HTTPS API",
+		Long: "Add an email channel that delivers through a provider's HTTP API\n" +
+			"instead of SMTP.\n\n" +
+			"Use this where outbound SMTP is blocked or unavailable — Railway\n" +
+			"disables SMTP below its Pro plan, for instance, while ordinary\n" +
+			"outbound HTTPS keeps working.\n\n" +
+			"Supported providers: " + strings.Join(notify.ProviderNames(), ", ") + ".\n" +
+			"cloudflare additionally needs --account-id, since its endpoint is\n" +
+			"per-account.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if name == "" {
+				return fmt.Errorf("--name is required")
+			}
+			if provider == "" {
+				return fmt.Errorf("--provider is required (one of %s)",
+					strings.Join(notify.ProviderNames(), ", "))
+			}
+			if from == "" {
+				return fmt.Errorf("--from is required")
+			}
+			if len(to) == 0 {
+				return fmt.Errorf("--to is required (repeatable)")
+			}
+
+			cfg := map[string]string{
+				apitypes.ConfigProvider: provider,
+				apitypes.ConfigFrom:     from,
+				apitypes.ConfigTo:       strings.Join(to, ","),
+			}
+			if fromName != "" {
+				cfg[apitypes.ConfigFromName] = fromName
+			}
+			if accountID != "" {
+				cfg[apitypes.ConfigAccountID] = accountID
+			}
+			if baseURL != "" {
+				cfg[apitypes.ConfigURL] = baseURL
+			}
+
+			key, err := a.channelAPIKey(apiKeyIn)
+			if err != nil {
+				return err
+			}
+			if key != "" {
+				cfg[apitypes.ConfigAPIKey] = key
+			}
+
+			ctx, cancel := a.Context()
+			defer cancel()
+
+			channel, err := a.Client.CreateChannel(ctx, apitypes.CreateChannelRequest{
+				Name:   name,
+				Type:   apitypes.ChannelEmailHTTP,
+				Config: cfg,
+			})
+			if err != nil {
+				return err
+			}
+			return a.printChannelCreated(channel)
+		},
+	}
+	flags := cmd.Flags()
+	flags.StringVar(&name, "name", "", "channel name (required)")
+	flags.StringVar(&provider, "provider", "",
+		"email provider: "+strings.Join(notify.ProviderNames(), ", ")+" (required)")
+	flags.BoolVar(&apiKeyIn, "api-key-stdin", false, "read the provider API key from stdin")
+	flags.StringVar(&from, "from", "", "From address (required)")
+	flags.StringVar(&fromName, "from-name", "", "display name for the From address")
+	flags.StringSliceVar(&to, "to", nil, "recipient address (required, repeatable)")
+	flags.StringVar(&accountID, "account-id", "", "provider account id (required by cloudflare)")
+	flags.StringVar(&baseURL, "url", "", "override the provider API base URL")
+	return cmd
+}
+
+// channelAPIKey collects a provider API key the same way other channel secrets
+// are collected: stdin when asked, a hidden prompt when interactive.
+func (a *App) channelAPIKey(fromStdin bool) (string, error) {
+	if fromStdin {
+		return readPasswordStdin()
+	}
+	if !a.canPrompt() {
+		return "", nil
+	}
+	value, err := a.promptSecret("Provider API key (leave empty to skip)")
+	if err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func (a *App) newChannelAddNtfyCommand() *cobra.Command {
@@ -422,6 +533,9 @@ func channelSummary(c apitypes.Channel) string {
 		port := c.Config[apitypes.ConfigSMTPPort]
 		to := c.Config[apitypes.ConfigTo]
 		return fmt.Sprintf("%s:%s -> %s", host, port, truncate(to, 40))
+	case apitypes.ChannelEmailHTTP:
+		return fmt.Sprintf("%s -> %s",
+			c.Config[apitypes.ConfigProvider], truncate(c.Config[apitypes.ConfigTo], 40))
 	case apitypes.ChannelNtfy:
 		url := c.Config[apitypes.ConfigURL]
 		if url == "" {
