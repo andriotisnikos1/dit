@@ -74,9 +74,37 @@ export DIT_MASTER_KEY=$(openssl rand -base64 32)
   --from dit@example.com --to ops@example.com \
   --username dit --password-stdin
 
+# Where outbound SMTP is blocked, send over a provider's HTTPS API instead.
+./bin/dit channel add email-http --name cf --provider cloudflare \
+  --account-id <account-id> \
+  --from alerts@example.com --to ops@example.com --api-key-stdin
+
+./bin/dit channel add email-http --name rs --provider resend \
+  --from alerts@example.com --to ops@example.com --api-key-stdin
+
 # Watches with no explicit subscription notify the channels flagged default.
 ./bin/dit channel default ops
 ```
+
+### Choosing an email transport
+
+`email` speaks SMTP; `email-http` posts to a transactional provider's HTTPS
+API. Prefer `email-http` when the host blocks outbound SMTP — Railway disables
+SMTP below its Pro plan, and the block is silent: a send hangs until the
+client's timeout and the proxy logs a bare 499 rather than an SMTP error.
+
+Supported providers:
+
+| Provider | Extra config | Notes |
+|---|---|---|
+| `cloudflare` | `--account-id` | Cloudflare Email Service; the endpoint is per-account |
+| `resend` | — | Railway's recommended default |
+| `postmark` | — | |
+| `sendgrid` | — | |
+
+All four are configured the same way: `--provider`, `--from`, `--to`, an API
+key via `--api-key-stdin`, and optionally `--from-name`. The key is sealed at
+rest and never returned by the API, exactly like an SMTP password.
 
 ---
 
@@ -138,6 +166,8 @@ dit watch rm <id> [--yes]
 
 dit channel add email --name <n> --smtp-host <h> [--smtp-port 587] [--starttls|--implicit-tls]
                       --from <a> --to <a>... [--username <u>] [--password-stdin]
+dit channel add email-http --name <n> --provider <p> --from <a> --to <a>...
+                      [--account-id <id>] [--from-name <n>] [--api-key-stdin] [--url <u>]
 dit channel add ntfy  --name <n> [--url https://ntfy.sh] --topic <t> [--token <t>]
                       [--priority default] [--tags <t>]
 dit channel list | show <id> | test <id> | default <id> [--off] | rm <id>
