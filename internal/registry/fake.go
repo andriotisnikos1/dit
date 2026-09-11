@@ -2,6 +2,8 @@ package registry
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -22,6 +24,7 @@ func Anonymous() authn.Authenticator { return authn.Anonymous }
 // Fake is an in-memory Client for tests. It records every call so tests can
 // assert on the request pattern, and it can be programmed to fail.
 type Fake struct {
+	mu sync.Mutex
 	// ProbeResults maps "registry/repository" to the probe outcome.
 	ProbeResults map[string]ProbeResult
 	// ProbeErr maps "registry/repository" to a probe failure.
@@ -47,6 +50,10 @@ type Fake struct {
 
 	// Calls records the method names invoked, in order.
 	Calls []string
+
+	// Delay, when set, is slept before every operation. It widens the window
+	// in tests that need checks to actually overlap.
+	Delay time.Duration
 }
 
 // NewFake builds an empty Fake with initialised maps.
@@ -137,6 +144,29 @@ func (f *Fake) SetDigestErr(registry, repository, tag string, err error) {
 	f.DigestErr[registry+"/"+repository+":"+tag] = err
 }
 
+// sleep applies the configured artificial delay, if any.
+func (f *Fake) sleep() {
+	if f.Delay > 0 {
+		time.Sleep(f.Delay)
+	}
+}
+
+// record appends to the call log under the lock.
+func (f *Fake) record(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, name)
+}
+
+// CallsMade returns a copy of the call log.
+func (f *Fake) CallsMade() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.Calls))
+	copy(out, f.Calls)
+	return out
+}
+
 // Probe implements Client.
 func (f *Fake) Probe(_ context.Context, repo name.Repository) (ProbeResult, error) {
 	return f.probe(repo, false)
@@ -148,7 +178,8 @@ func (f *Fake) ProbeWithAuth(_ context.Context, repo name.Repository, _ authn.Au
 }
 
 func (f *Fake) probe(repo name.Repository, authenticated bool) (ProbeResult, error) {
-	f.Calls = append(f.Calls, "probe")
+	f.sleep()
+	f.record("probe")
 	key := repo.RegistryStr() + "/" + repo.RepositoryStr()
 	if authenticated {
 		// AuthenticatedProbeResults lets a test model a registry that is
@@ -171,7 +202,8 @@ func (f *Fake) probe(repo name.Repository, authenticated bool) (ProbeResult, err
 
 // ResolveDigest implements Client.
 func (f *Fake) ResolveDigest(_ context.Context, ref name.Reference, _ authn.Authenticator) (v1.Hash, error) {
-	f.Calls = append(f.Calls, "resolve")
+	f.sleep()
+	f.record("resolve")
 	key := ref.Context().RegistryStr() + "/" + ref.Context().RepositoryStr() + ":" + ref.Identifier()
 	if err, ok := f.DigestErr[key]; ok {
 		return v1.Hash{}, err
@@ -190,7 +222,8 @@ func (f *Fake) ResolveDigest(_ context.Context, ref name.Reference, _ authn.Auth
 
 // ListTags implements Client.
 func (f *Fake) ListTags(_ context.Context, repo name.Repository, _ authn.Authenticator) ([]string, error) {
-	f.Calls = append(f.Calls, "list")
+	f.sleep()
+	f.record("list")
 	key := repo.RegistryStr() + "/" + repo.RepositoryStr()
 	if err, ok := f.TagsErr[key]; ok {
 		return nil, err
