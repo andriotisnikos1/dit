@@ -181,6 +181,11 @@ func (s *Server) setFlag(ctx context.Context, watchID, name string, raw any) (*a
 		if sErr := s.store.SetWatchFlag(ctx, watchID, name, value); sErr != nil {
 			return nil, s.storeFlagError(sErr, "watch")
 		}
+		// Re-read the watch: the returned view must describe the state after
+		// this write, not the record loaded to validate it.
+		if watch, sErr = s.store.GetWatch(ctx, watchID); sErr != nil {
+			return nil, s.storeFlagError(sErr, "watch")
+		}
 	} else {
 		encoded, encErr := flags.FormatValue(def, value)
 		if encErr != nil {
