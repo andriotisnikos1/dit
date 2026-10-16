@@ -519,11 +519,14 @@ func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, tri
 	// Self-heal: semver mode was toggled off with bumps still pending. Their
 	// events flush with the next change batch (ChangeEventTypes includes
 	// semver_new_tag), so the stale counter must not keep inflating the
-	// history retention.
+	// history retention. Zero the in-memory copy too: pruneHistory reads the
+	// snapshot, and leaving it stale would keep retention inflated for this
+	// check even though the persisted counter is already back to zero.
 	if watch.PendingSemverCount > 0 {
 		if err := e.store.ResetPendingCount(ctx, watch.ID, store.PendingSemverCount); err != nil {
 			return nil, err
 		}
+		watch.PendingSemverCount = 0
 	}
 
 	if outcome.Baseline {
