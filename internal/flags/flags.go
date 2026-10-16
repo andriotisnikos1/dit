@@ -20,7 +20,9 @@ import (
 type Type string
 
 const (
-	TypeInt  Type = "int"
+	// TypeInt marks a flag whose value is an integer.
+	TypeInt Type = "int"
+	// TypeBool marks a flag whose value is a boolean.
 	TypeBool Type = "bool"
 )
 
@@ -129,25 +131,25 @@ func parseInt(def Definition, raw any) (int, error) {
 	case float64:
 		// JSON numbers decode as float64; the value must be integral.
 		if v != math.Trunc(v) {
-			return 0, fmt.Errorf("flag %q expects an integer, got %v", def.Name, v)
+			return 0, fmt.Errorf("flags: %s expects an integer, got %v", def.Name, v)
 		}
 		n = int(v)
 	case string:
 		parsed, err := strconv.Atoi(v)
 		if err != nil {
-			return 0, fmt.Errorf("flag %q expects an integer, got %q", def.Name, v)
+			return 0, fmt.Errorf("flags: %s expects an integer, got %q", def.Name, v)
 		}
 		n = parsed
 	default:
-		return 0, fmt.Errorf("flag %q expects an integer, got %T", def.Name, raw)
+		return 0, fmt.Errorf("flags: %s expects an integer, got %T", def.Name, raw)
 	}
 	if def.Min != nil && n < *def.Min {
-		return 0, fmt.Errorf("flag %q must be >= %d, got %d", def.Name, *def.Min, n)
+		return 0, fmt.Errorf("flags: %s must be >= %d, got %d", def.Name, *def.Min, n)
 	}
 	// 0 is not a meaningful count: history is -1 (keep all) or a positive
 	// number, and the thresholds are >= 1, so no int flag accepts 0.
 	if n == 0 {
-		return 0, fmt.Errorf("flag %q must not be 0", def.Name)
+		return 0, fmt.Errorf("flags: %s must not be 0", def.Name)
 	}
 	return n, nil
 }
@@ -159,11 +161,11 @@ func parseBool(def Definition, raw any) (bool, error) {
 	case string:
 		parsed, err := strconv.ParseBool(v)
 		if err != nil {
-			return false, fmt.Errorf("flag %q expects a boolean (true/false/1/0), got %q", def.Name, v)
+			return false, fmt.Errorf("flags: %s expects a boolean (true/false/1/0), got %q", def.Name, v)
 		}
 		return parsed, nil
 	default:
-		return false, fmt.Errorf("flag %q expects a boolean, got %T", def.Name, raw)
+		return false, fmt.Errorf("flags: %s expects a boolean, got %T", def.Name, raw)
 	}
 }
 
@@ -254,6 +256,8 @@ func Resolve(watchFlags, globalFlags map[string]any) (Settings, error) {
 			out.SemverStable = v.(bool)
 		case "semver_notify_threshold":
 			out.SemverNotifyThreshold = v.(int)
+		default:
+			return Settings{}, fmt.Errorf("flags: internal: unhandled flag %q", def.Name)
 		}
 	}
 	return out, nil

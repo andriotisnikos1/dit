@@ -33,6 +33,19 @@ func TestResolvePrecedence(t *testing.T) {
 	if s.Semver {
 		t.Error("Semver = true, want the default false")
 	}
+	s, err = Resolve(
+		map[string]any{"semver_stable": true, "semver_notify_threshold": float64(4)},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	want := DefaultSettings()
+	want.SemverStable = true
+	want.SemverNotifyThreshold = 4
+	if s != want {
+		t.Errorf("Resolve = %+v, want %+v", s, want)
+	}
 }
 
 func TestParseValueRejectsBadInput(t *testing.T) {
@@ -42,6 +55,12 @@ func TestParseValueRejectsBadInput(t *testing.T) {
 	}
 	if _, err := ParseValue(history, -2); err == nil {
 		t.Error("history accepts -2, want rejection (min is -1)")
+	}
+	if v, err := ParseValue(history, -1); err != nil || v != -1 {
+		t.Errorf("ParseValue(history, -1) = %v, %v; want -1, nil (keep-all sentinel)", v, err)
+	}
+	if v, err := ParseValue(history, int64(7)); err != nil || v != 7 {
+		t.Errorf("ParseValue(history, int64(7)) = %v, %v; want 7, nil", v, err)
 	}
 	if _, err := ParseValue(history, "abc"); err == nil {
 		t.Error("history accepts a non-integer string")
@@ -82,5 +101,42 @@ func TestResolveRejectsUnknownNames(t *testing.T) {
 	}
 	if _, err := Resolve(nil, map[string]any{"nope": 1}); err == nil {
 		t.Error("unknown global flag accepted")
+	}
+}
+
+func TestFormatValue(t *testing.T) {
+	history, _ := Lookup("history")
+	got, err := FormatValue(history, 5)
+	if err != nil {
+		t.Fatalf("FormatValue(history, 5): %v", err)
+	}
+	if got != "5" {
+		t.Errorf("FormatValue(history, 5) = %q, want %q", got, "5")
+	}
+	semver, _ := Lookup("semver")
+	got, err = FormatValue(semver, true)
+	if err != nil {
+		t.Fatalf("FormatValue(semver, true): %v", err)
+	}
+	if got != "true" {
+		t.Errorf("FormatValue(semver, true) = %q, want %q", got, "true")
+	}
+	if _, err := FormatValue(history, "5"); err == nil {
+		t.Error(`FormatValue(history, "5") accepted a non-int value`)
+	}
+	if _, err := FormatValue(semver, 1); err == nil {
+		t.Error("FormatValue(semver, 1) accepted a non-bool value")
+	}
+}
+
+func TestResolveInvalidOverridePropagates(t *testing.T) {
+	if _, err := Resolve(nil, map[string]any{"history": 0}); err == nil {
+		t.Error("Resolve accepted an invalid global override (history: 0)")
+	}
+	if _, err := Resolve(
+		map[string]any{"history": 0}, // invalid watch override
+		map[string]any{"history": 5}, // valid global
+	); err == nil {
+		t.Error("Resolve accepted an invalid watch override despite a valid global")
 	}
 }
