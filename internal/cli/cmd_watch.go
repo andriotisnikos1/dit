@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
+	"github.com/andriotisnikos1/dit/internal/flags"
 )
 
 func (a *App) newWatchCommand() *cobra.Command {
@@ -179,6 +180,7 @@ func (a *App) newWatchShowCommand() *cobra.Command {
 					{"Enabled", formatBool(watch.Enabled)},
 					{"Notify on failure", formatBool(watch.NotifyOnFailure)},
 					{"Channels", joinOr(watch.Channels, "(defaults)")},
+					{"Flags", formatWatchFlags(watch)},
 					{"Last digest", shortDigest(watch.LastDigest)},
 					{"Last checked", formatTime(watch.LastCheckedAt)},
 					{"Last OK", formatTime(watch.LastOKAt)},
@@ -439,4 +441,31 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// formatWatchFlags renders the non-default effective flags with their source:
+// "(local)" for per-watch overrides, "(global)" for values inherited from the
+// global settings. A non-default value that is not local can only come from
+// the global settings, so the labels are exhaustive.
+func formatWatchFlags(w apitypes.Watch) string {
+	var parts []string
+	for _, def := range flags.Definitions() {
+		v, ok := w.Flags[def.Name]
+		if !ok {
+			continue
+		}
+		_, isLocal := w.FlagsLocal[def.Name]
+		if !isLocal && fmt.Sprintf("%v", v) == fmt.Sprintf("%v", def.Default) {
+			continue
+		}
+		scope := "global"
+		if isLocal {
+			scope = "local"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%v (%s)", def.Name, v, scope))
+	}
+	if len(parts) == 0 {
+		return "(defaults)"
+	}
+	return strings.Join(parts, ", ")
 }

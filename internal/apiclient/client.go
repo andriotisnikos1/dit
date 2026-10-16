@@ -76,6 +76,10 @@ type API interface {
 	CheckWatch(ctx context.Context, id string) (apitypes.CheckResult, error)
 	WatchEvents(ctx context.Context, id string, limit int) (apitypes.List[apitypes.Event], error)
 
+	ListFlags(ctx context.Context, watchID string) (apitypes.FlagList, error)
+	SetFlag(ctx context.Context, watchID, name string, value any) (apitypes.Flag, error)
+	UnsetFlag(ctx context.Context, watchID, name string) error
+
 	Events(ctx context.Context, q EventQuery) (apitypes.List[apitypes.Event], error)
 	Notifications(ctx context.Context, limit int) (apitypes.List[apitypes.Notification], error)
 	RetryNotification(ctx context.Context, id string) (apitypes.NotificationRetryResult, error)
@@ -193,6 +197,37 @@ func (c *Client) WatchEvents(ctx context.Context, id string, limit int) (apitype
 	}
 	err := c.do(ctx, http.MethodGet, "/api/v1/watches/"+url.PathEscape(id)+"/events", query, nil, &out, false)
 	return out, err
+}
+
+// flagPath builds the endpoint for a flag, globally or scoped to a watch.
+func flagPath(watchID, name string) string {
+	if watchID != "" {
+		return "/api/v1/watches/" + url.PathEscape(watchID) + "/flags/" + url.PathEscape(name)
+	}
+	if name != "" {
+		return "/api/v1/flags/" + url.PathEscape(name)
+	}
+	return "/api/v1/flags"
+}
+
+// ListFlags lists behaviour flags, globally (watchID "") or for a watch.
+func (c *Client) ListFlags(ctx context.Context, watchID string) (apitypes.FlagList, error) {
+	var out apitypes.FlagList
+	err := c.do(ctx, http.MethodGet, flagPath(watchID, ""), nil, nil, &out, false)
+	return out, err
+}
+
+// SetFlag sets one flag value, globally or on a watch.
+func (c *Client) SetFlag(ctx context.Context, watchID, name string, value any) (apitypes.Flag, error) {
+	var out apitypes.Flag
+	err := c.do(ctx, http.MethodPut, flagPath(watchID, name), nil,
+		apitypes.SetFlagRequest{Value: value}, &out, false)
+	return out, err
+}
+
+// UnsetFlag removes a flag override, globally or on a watch.
+func (c *Client) UnsetFlag(ctx context.Context, watchID, name string) error {
+	return c.do(ctx, http.MethodDelete, flagPath(watchID, name), nil, nil, nil, false)
 }
 
 // Events lists the global event feed.

@@ -38,6 +38,10 @@ type stubAPI struct {
 	statusFn         func(context.Context) (apitypes.Status, error)
 	healthFn         func(context.Context) (apitypes.Health, error)
 
+	listFlagsFn func(context.Context, string) (apitypes.FlagList, error)
+	setFlagFn   func(context.Context, string, string, any) (apitypes.Flag, error)
+	unsetFlagFn func(context.Context, string, string) error
+
 	// Calls records the method names invoked.
 	Calls []string
 }
@@ -225,6 +229,30 @@ func (s *stubAPI) DeleteCredentials(ctx context.Context, host string) error {
 		return nil
 	}
 	return s.deleteCredsFn(ctx, host)
+}
+
+func (s *stubAPI) ListFlags(ctx context.Context, watchID string) (apitypes.FlagList, error) {
+	s.record("listFlags")
+	if s.listFlagsFn == nil {
+		return apitypes.FlagList{}, nil
+	}
+	return s.listFlagsFn(ctx, watchID)
+}
+
+func (s *stubAPI) SetFlag(ctx context.Context, watchID, name string, value any) (apitypes.Flag, error) {
+	s.record("setFlag")
+	if s.setFlagFn == nil {
+		return apitypes.Flag{Name: name}, nil
+	}
+	return s.setFlagFn(ctx, watchID, name, value)
+}
+
+func (s *stubAPI) UnsetFlag(ctx context.Context, watchID, name string) error {
+	s.record("unsetFlag")
+	if s.unsetFlagFn == nil {
+		return nil
+	}
+	return s.unsetFlagFn(ctx, watchID, name)
 }
 
 var _ apiclient.API = (*stubAPI)(nil)
