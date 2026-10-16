@@ -34,6 +34,19 @@ type WatchRecord struct {
 
 	// ChannelIDs are the explicit subscriptions. Empty means "use defaults".
 	ChannelIDs []string
+
+	// Flags are the explicit per-watch flag overrides (parsed from flags_json).
+	Flags map[string]any
+	// PendingNotifyCount is the number of update events waiting for their
+	// notify_threshold batch to fire.
+	PendingNotifyCount int
+	// PendingSemverCount is the number of semver bumps waiting for their
+	// semver_notify_threshold batch to fire.
+	PendingSemverCount int
+	// LatestSemver / LatestSemverTag are the highest semver version seen by
+	// this watch in semver mode (canonical string / raw tag). Empty = unset.
+	LatestSemver    string
+	LatestSemverTag string
 }
 
 // HasBaseline reports whether the watch has completed at least one successful
@@ -79,7 +92,8 @@ type WatchFilter struct {
 
 const watchColumns = `id, image, registry, repository, kind, ref, enabled,
 	notify_on_failure, last_digest, last_checked_at, last_ok_at, baseline_at,
-	last_error, consecutive_failures, next_attempt_at, created_at, updated_at`
+	last_error, consecutive_failures, next_attempt_at, created_at, updated_at,
+	flags_json, pending_notify_count, pending_semver_count, latest_semver, latest_semver_tag`
 
 // CreateWatch inserts a watch and its channel subscriptions atomically. It
 // returns ErrDuplicate when an identical (registry, repository, kind, ref)
@@ -529,16 +543,26 @@ func scanWatch(s scanner) (*WatchRecord, error) {
 		lastChecked, lastOK, baselineAt sql.NullString
 		nextTry                         sql.NullString
 		createdAt, updatedAt            string
+		flagsJSON                       string
 	)
 	err := s.Scan(&w.ID, &w.Image, &w.Registry, &w.Repository, &kind, &w.Ref,
 		&enabled, &notifyOnFailure, &w.LastDigest, &lastChecked, &lastOK, &baselineAt,
-		&w.LastError, &w.ConsecutiveFailures, &nextTry, &createdAt, &updatedAt)
+		&w.LastError, &w.ConsecutiveFailures, &nextTry, &createdAt, &updatedAt,
+		&flagsJSON, &w.PendingNotifyCount, &w.PendingSemverCount,
+		&w.LatestSemver, &w.LatestSemverTag)
 	if err != nil {
 		return nil, translateErr(err)
 	}
 	w.Kind = apitypes.WatchKind(kind)
 	w.Enabled = enabled != 0
 	w.NotifyOnFailure = notifyOnFailure != 0
+	if flagsJSON != "" {
+		flags, err := unmarshalJSONMap(flagsJSON)
+		if err != nil {
+			return nil, err
+		}
+		w.Flags = flags
+	}
 	if w.LastCheckedAt, err = timePtr(lastChecked); err != nil {
 		return nil, err
 	}
