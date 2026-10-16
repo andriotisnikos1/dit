@@ -341,3 +341,113 @@ func scanNotification(s scanner) (*NotificationRecord, error) {
 	}
 	return &n, nil
 }
+
+// ---------- flag-driven history helpers ----------
+
+// RecentEvents returns the newest n events of the given types for a watch,
+// newest first. n <= 0 or an empty type list returns nil.
+func (db *DB) RecentEvents(ctx context.Context, watchID string, types []apitypes.EventType, n int) ([]*EventRecord, error) {
+	if n <= 0 || len(types) == 0 {
+		return nil, nil
+	}
+	args := []any{watchID}
+	for _, t := range types {
+		args = append(args, string(t))
+	}
+	args = append(args, n)
+	rows, err := db.db.QueryContext(ctx, `
+		SELECT e.id, e.watch_id, e.type, e.tag, e.old_digest, e.new_digest,
+		       e.detail_json, e.created_at, COALESCE(w.image, '')
+		FROM events e
+		LEFT JOIN watches w ON w.id = e.watch_id
+		WHERE e.watch_id = ? AND e.type IN (`+placeholders(len(types))+`)
+		ORDER BY e.created_at DESC, e.id DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: recent events: %w", err)
+	}
+	defer rows.Close()
+
+	out := []*EventRecord{}
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate recent events: %w", err)
+	}
+	return out, nil
+}
+
+// placeholders renders "?,?,?" for an IN clause.
+func placeholders(n int) string {
+	out := ""
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			out += ","
+		}
+		out += "?"
+	}
+	return out
+}
+
+// PruneWatchEvents caps the per-watch event history: the newest `keep`
+// update-family events and the newest `keep` failure-family events survive;
+// everything older is deleted, and notification rows cascade with their
+// events. keep <= 0 deletes the watch's entire event history.
+func (db *DB) PruneWatchEvents(ctx context.Context, watchID string, keep int) (int, error) {
+	families := [][]apitypes.EventType{apitypes.ChangeEventTypes(), apitypes.FailureEventTypes()}
+	total := 0
+	err := db.withTx(ctx, func(tx *sql.Tx) error {
+		for _, family := range families {
+			n, err := pruneEventFamily(ctx, tx, watchID, family, keep)
+			if err != nil {
+				return err
+			}
+			total += n
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// pruneEventFamily deletes all but the newest keep events of a family.
+func pruneEventFamily(ctx context.Context, tx *sql.Tx, watchID string, types []apitypes.EventType, keep int) (int, error) {
+	in := placeholders(len(types))
+	args := []any{watchID}
+	for _, t := range types {
+		args = append(args, string(t))
+	}
+
+	var (
+		res sql.Result
+		err error
+	)
+	if keep <= 0 {
+		res, err = tx.ExecContext(ctx,
+			`DELETE FROM events WHERE watch_id = ? AND type IN (`+in+`)`, args...)
+	} else {
+		args = append(args, watchID)
+		for _, t := range types {
+			args = append(args, string(t))
+		}
+		args = append(args, keep)
+		res, err = tx.ExecContext(ctx, `
+			DELETE FROM events
+			WHERE watch_id = ? AND type IN (`+in+`) AND id NOT IN (
+				SELECT id FROM events WHERE watch_id = ? AND type IN (`+in+`)
+				ORDER BY created_at DESC, id DESC LIMIT ?
+			)`, args...)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: prune events: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
