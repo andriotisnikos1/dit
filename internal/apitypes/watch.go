@@ -14,24 +14,30 @@ const (
 
 // Watch is the wire representation of a configured watch.
 type Watch struct {
-	ID                  string     `json:"id"                    yaml:"id"`
-	Image               string     `json:"image"                 yaml:"image"`
-	Registry            string     `json:"registry"              yaml:"registry"`
-	Repository          string     `json:"repository"            yaml:"repository"`
-	Kind                WatchKind  `json:"kind"                  yaml:"kind"`
-	Ref                 string     `json:"ref"                   yaml:"ref"`
-	Enabled             bool       `json:"enabled"               yaml:"enabled"`
-	NotifyOnFailure     bool       `json:"notify_on_failure"     yaml:"notify_on_failure"`
-	Channels            []string   `json:"channels"              yaml:"channels"`
-	LastDigest          string     `json:"last_digest,omitempty" yaml:"last_digest,omitempty"`
-	LastCheckedAt       *time.Time `json:"last_checked_at,omitempty" yaml:"last_checked_at,omitempty"`
-	LastOKAt            *time.Time `json:"last_ok_at,omitempty"  yaml:"last_ok_at,omitempty"`
-	BaselineAt          *time.Time `json:"baseline_at,omitempty" yaml:"baseline_at,omitempty"`
-	LastError           string     `json:"last_error,omitempty"  yaml:"last_error,omitempty"`
-	ConsecutiveFailures int        `json:"consecutive_failures"  yaml:"consecutive_failures"`
-	NextAttemptAt       *time.Time `json:"next_attempt_at,omitempty" yaml:"next_attempt_at,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"            yaml:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"            yaml:"updated_at"`
+	ID              string    `json:"id"                    yaml:"id"`
+	Image           string    `json:"image"                 yaml:"image"`
+	Registry        string    `json:"registry"              yaml:"registry"`
+	Repository      string    `json:"repository"            yaml:"repository"`
+	Kind            WatchKind `json:"kind"                  yaml:"kind"`
+	Ref             string    `json:"ref"                   yaml:"ref"`
+	Enabled         bool      `json:"enabled"               yaml:"enabled"`
+	NotifyOnFailure bool      `json:"notify_on_failure"     yaml:"notify_on_failure"`
+	Channels        []string  `json:"channels"              yaml:"channels"`
+	// Flags are the effective behaviour-flag values for this watch
+	// (resolved: watch override > global > default). Pattern-only flags are
+	// omitted for tag watches.
+	Flags map[string]any `json:"flags"                 yaml:"flags"`
+	// FlagsLocal are the explicit per-watch overrides (omitted when none).
+	FlagsLocal          map[string]any `json:"flags_local,omitempty" yaml:"flags_local,omitempty"`
+	LastDigest          string         `json:"last_digest,omitempty" yaml:"last_digest,omitempty"`
+	LastCheckedAt       *time.Time     `json:"last_checked_at,omitempty" yaml:"last_checked_at,omitempty"`
+	LastOKAt            *time.Time     `json:"last_ok_at,omitempty"  yaml:"last_ok_at,omitempty"`
+	BaselineAt          *time.Time     `json:"baseline_at,omitempty" yaml:"baseline_at,omitempty"`
+	LastError           string         `json:"last_error,omitempty"  yaml:"last_error,omitempty"`
+	ConsecutiveFailures int            `json:"consecutive_failures"  yaml:"consecutive_failures"`
+	NextAttemptAt       *time.Time     `json:"next_attempt_at,omitempty" yaml:"next_attempt_at,omitempty"`
+	CreatedAt           time.Time      `json:"created_at"            yaml:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"            yaml:"updated_at"`
 }
 
 // CreateWatchRequest is the body of POST /api/v1/watches. Exactly one of Tags

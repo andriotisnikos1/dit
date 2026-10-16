@@ -10,6 +10,8 @@ const (
 	EventDigestChanged EventType = "digest_changed"
 	// EventNewTags fires when a pattern watch sees tags it has never seen.
 	EventNewTags EventType = "new_tags"
+	// EventSemverNewTag fires when a semver pattern watch sees a new highest version.
+	EventSemverNewTag EventType = "semver_new_tag"
 	// EventCheckFailed fires on the first failure of a run of failures.
 	EventCheckFailed EventType = "check_failed"
 	// EventCheckRecovered fires when a failing watch returns to health.
@@ -18,7 +20,19 @@ const (
 
 // EventTypes lists every known event type, for CLI validation and help text.
 func EventTypes() []EventType {
-	return []EventType{EventDigestChanged, EventNewTags, EventCheckFailed, EventCheckRecovered}
+	return []EventType{EventDigestChanged, EventNewTags, EventSemverNewTag, EventCheckFailed, EventCheckRecovered}
+}
+
+// ChangeEventTypes are the event types that count as a tracked image update
+// for history retention and notify_threshold batching.
+func ChangeEventTypes() []EventType {
+	return []EventType{EventDigestChanged, EventNewTags, EventSemverNewTag}
+}
+
+// FailureEventTypes are the health-related event types; they are never
+// deferred by notify_threshold.
+func FailureEventTypes() []EventType {
+	return []EventType{EventCheckFailed, EventCheckRecovered}
 }
 
 // Valid reports whether t is a known event type.
