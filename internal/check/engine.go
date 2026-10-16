@@ -506,15 +506,17 @@ func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, tri
 		e.emitRecovered(ctx, watch, settings)
 	}
 
+	// Semver mode replaces the new-tags report with version bumps. It runs
+	// even on the baseline check so the highest existing version seeds
+	// silently, instead of surfacing as a bump on the second check.
+	if settings.Semver {
+		return e.checkPatternSemver(ctx, watch, repo, auth, outcome.Matched, result, settings)
+	}
+
 	if outcome.Baseline {
 		e.log.Debug("pattern baseline recorded", "watch", watch.ID, "image", watch.Image,
 			"pattern", watch.Ref, "tags", len(outcome.Matched))
 		return result, nil
-	}
-
-	// Semver mode replaces the new-tags report with version bumps.
-	if settings.Semver {
-		return e.checkPatternSemver(ctx, watch, repo, auth, outcome.Matched, result, settings)
 	}
 
 	if len(outcome.NewTags) == 0 {
@@ -651,13 +653,61 @@ func (e *Engine) lockWatch(watchID string) func() {
 	return mu.Unlock
 }
 
-// checkPatternSemver is implemented in the semver task; until then semver
-// mode is unreachable (no API to set the flag on a watch exists yet).
+// checkPatternSemver handles a pattern watch in semver mode: the highest
+// semver version among matched tags is tracked, and only version bumps
+// produce events. Ordinary new tags are recorded to the tag baseline (by the
+// caller) but never reported, so toggling semver off resumes clean new-tags
+// behavior without a re-baseline flood.
 func (e *Engine) checkPatternSemver(ctx context.Context, watch *store.WatchRecord, repo name.Repository, auth authn.Authenticator, matched []string, result *apitypes.CheckResult, settings flags.Settings) (*apitypes.CheckResult, error) {
-	_ = ctx
-	_ = repo
-	_ = auth
-	_ = matched
-	_ = settings
+	top, ok := HighestSemverTag(matched, settings.SemverStable)
+	if !ok {
+		// No tag parses as semver; leave any previously recorded version alone.
+		return result, nil
+	}
+
+	if watch.LatestSemver == "" {
+		// Seeding the highest version present is the semver baseline, in the
+		// same spirit as a tag watch's first digest: activation must not fire
+		// on what already exists (migration 0002's rule).
+		if err := e.store.SetLatestSemver(ctx, watch.ID, top.Version, top.Tag); err != nil {
+			return nil, err
+		}
+		e.log.Debug("semver baseline recorded", "watch", watch.ID,
+			"version", top.Version, "tag", top.Tag)
+		return result, nil
+	}
+	if !SemverBump(watch.LatestSemver, top) {
+		return result, nil
+	}
+
+	e.log.Info("semver bump", "watch", watch.ID, "image", watch.Image,
+		"from", watch.LatestSemver, "to", top.Version)
+	// State before the event, matching the existing pattern: a delivery
+	// failure must not cause the same bump to be reported again.
+	if err := e.store.SetLatestSemver(ctx, watch.ID, top.Version, top.Tag); err != nil {
+		return nil, err
+	}
+
+	digest := e.resolveTagDigest(ctx, repo, top.Tag, auth)
+	event, notified, err := e.recordChange(ctx, watch, settings,
+		store.PendingSemverCount, settings.SemverNotifyThreshold,
+		[]apitypes.EventType{apitypes.EventSemverNewTag},
+		store.CreateEventInput{
+			WatchID:   watch.ID,
+			Type:      apitypes.EventSemverNewTag,
+			Tag:       top.Tag,
+			NewDigest: digest,
+			Detail: map[string]any{
+				"pattern":  watch.Ref,
+				"previous": watch.LatestSemver,
+				"version":  top.Version,
+			},
+		})
+	if err != nil {
+		return nil, err
+	}
+	result.EventID = event.ID
+	result.NewTags = []apitypes.TagDigest{{Tag: top.Tag, Digest: digest}}
+	result.Notified = notified
 	return result, nil
 }
