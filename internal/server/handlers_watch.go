@@ -7,6 +7,7 @@ import (
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
 	"github.com/andriotisnikos1/dit/internal/check"
+	"github.com/andriotisnikos1/dit/internal/flags"
 	"github.com/andriotisnikos1/dit/internal/registry"
 	"github.com/andriotisnikos1/dit/internal/store"
 )
@@ -108,12 +109,20 @@ func (s *Server) handleCreateWatch(w http.ResponseWriter, r *http.Request) {
 		specs = append(specs, spec{kind: apitypes.WatchKindPattern, ref: pattern})
 	}
 
+	// Flag resolution needs the global settings; load them once per request
+	// instead of once per watch.
+	globalFlags, err := s.globalFlagValues(ctx)
+	if err != nil {
+		writeStoreError(w, r, err, "settings", s.log)
+		return
+	}
+
 	for _, sp := range specs {
 		existing, err := s.store.FindWatch(ctx, image.Registry, image.Repository, sp.kind, sp.ref)
 		switch {
 		case err == nil:
 			response.Existing = append(response.Existing, sp.ref)
-			response.Watches = append(response.Watches, s.toAPIWatch(existing))
+			response.Watches = append(response.Watches, s.toAPIWatch(ctx, globalFlags, existing))
 			continue
 		case !store.IsNotFound(err):
 			writeStoreError(w, r, err, "watch", s.log)
@@ -140,7 +149,7 @@ func (s *Server) handleCreateWatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response.Created = append(response.Created, created.ID)
-		response.Watches = append(response.Watches, s.toAPIWatch(created))
+		response.Watches = append(response.Watches, s.toAPIWatch(ctx, globalFlags, created))
 	}
 
 	status := http.StatusCreated
@@ -178,9 +187,16 @@ func (s *Server) handleListWatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One settings query for the whole listing, not one per watch.
+	globalFlags, err := s.globalFlagValues(ctx)
+	if err != nil {
+		writeStoreError(w, r, err, "settings", s.log)
+		return
+	}
+
 	items := make([]apitypes.Watch, 0, len(watches))
 	for _, watch := range watches {
-		items = append(items, s.toAPIWatch(watch))
+		items = append(items, s.toAPIWatch(ctx, globalFlags, watch))
 	}
 	writeJSON(w, r, http.StatusOK, apitypes.NewList(items, total, limit, offset))
 }
@@ -195,7 +211,12 @@ func (s *Server) handleGetWatch(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "watch", s.log)
 		return
 	}
-	writeJSON(w, r, http.StatusOK, s.toAPIWatch(watch))
+	globalFlags, err := s.globalFlagValues(ctx)
+	if err != nil {
+		writeStoreError(w, r, err, "settings", s.log)
+		return
+	}
+	writeJSON(w, r, http.StatusOK, s.toAPIWatch(ctx, globalFlags, watch))
 }
 
 // handleUpdateWatch toggles a watch and manages its channel subscriptions.
@@ -227,7 +248,12 @@ func (s *Server) handleUpdateWatch(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "watch", s.log)
 		return
 	}
-	writeJSON(w, r, http.StatusOK, s.toAPIWatch(watch))
+	globalFlags, err := s.globalFlagValues(ctx)
+	if err != nil {
+		writeStoreError(w, r, err, "settings", s.log)
+		return
+	}
+	writeJSON(w, r, http.StatusOK, s.toAPIWatch(ctx, globalFlags, watch))
 }
 
 // handleDeleteWatch removes a watch and everything that hangs off it.
@@ -377,12 +403,29 @@ func (s *Server) resolveChannels(ctx context.Context, names []string) ([]string,
 	return out, nil
 }
 
-// toAPIWatch converts a stored watch into its wire form.
-func (s *Server) toAPIWatch(w *store.WatchRecord) apitypes.Watch {
+// toAPIWatch converts a stored watch into its wire form, resolving the
+// effective behaviour flags against the pre-loaded global values.
+func (s *Server) toAPIWatch(ctx context.Context, global map[string]any, w *store.WatchRecord) apitypes.Watch {
 	channels := w.ChannelIDs
 	if channels == nil {
 		channels = []string{}
 	}
+
+	effective, err := flags.Resolve(w.Flags, global)
+	if err != nil {
+		s.log.Warn("resolve flags", "watch", w.ID, "error", err)
+		effective = flags.DefaultSettings()
+	}
+	flagsMap := map[string]any{
+		"history":          effective.History,
+		"notify_threshold": effective.NotifyThreshold,
+	}
+	if w.Kind == apitypes.WatchKindPattern {
+		flagsMap["semver"] = effective.Semver
+		flagsMap["semver_stable"] = effective.SemverStable
+		flagsMap["semver_notify_threshold"] = effective.SemverNotifyThreshold
+	}
+
 	return apitypes.Watch{
 		ID:                  w.ID,
 		Image:               w.Image,
@@ -402,6 +445,8 @@ func (s *Server) toAPIWatch(w *store.WatchRecord) apitypes.Watch {
 		NextAttemptAt:       w.NextAttemptAt,
 		CreatedAt:           w.CreatedAt,
 		UpdatedAt:           w.UpdatedAt,
+		Flags:               flagsMap,
+		FlagsLocal:          w.Flags,
 	}
 }
 

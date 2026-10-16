@@ -115,8 +115,15 @@ func (s *Server) routes() http.Handler {
 	api("DELETE /api/v1/watches/{id}", s.handleDeleteWatch)
 	api("POST /api/v1/watches/{id}/check", s.handleCheckWatch)
 	api("GET /api/v1/watches/{id}/events", s.handleWatchEvents)
+	api("GET /api/v1/watches/{id}/flags", s.handleListWatchFlags)
+	api("PUT /api/v1/watches/{id}/flags/{name}", s.handleSetWatchFlag)
+	api("DELETE /api/v1/watches/{id}/flags/{name}", s.handleUnsetWatchFlag)
 
 	api("GET /api/v1/events", s.handleListEvents)
+
+	api("GET /api/v1/flags", s.handleListFlags)
+	api("PUT /api/v1/flags/{name}", s.handleSetGlobalFlag)
+	api("DELETE /api/v1/flags/{name}", s.handleUnsetGlobalFlag)
 
 	api("GET /api/v1/channels", s.handleListChannels)
 	api("POST /api/v1/channels", s.handleCreateChannel)
