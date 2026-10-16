@@ -200,9 +200,15 @@ func (c *Client) WatchEvents(ctx context.Context, id string, limit int) (apitype
 }
 
 // flagPath builds the endpoint for a flag, globally or scoped to a watch.
+// The trailing segment is only appended when there is one: a listing path must
+// not carry a dangling slash, which no route matches.
 func flagPath(watchID, name string) string {
 	if watchID != "" {
-		return "/api/v1/watches/" + url.PathEscape(watchID) + "/flags/" + url.PathEscape(name)
+		path := "/api/v1/watches/" + url.PathEscape(watchID) + "/flags"
+		if name != "" {
+			path += "/" + url.PathEscape(name)
+		}
+		return path
 	}
 	if name != "" {
 		return "/api/v1/flags/" + url.PathEscape(name)
