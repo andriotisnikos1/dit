@@ -30,11 +30,15 @@ func (db *DB) SetWatchFlag(ctx context.Context, watchID, name string, value any)
 			`SELECT flags_json FROM watches WHERE id = ?`, watchID).Scan(&raw); err != nil {
 			return translateErr(err)
 		}
-		flags := map[string]any{}
-		if raw != "" {
-			if err := json.Unmarshal([]byte(raw), &flags); err != nil {
-				return fmt.Errorf("store: decode watch flags: %w", err)
-			}
+		flags, err := unmarshalJSONMap(raw)
+		if err != nil {
+			return fmt.Errorf("store: decode watch flags: %w", err)
+		}
+		// "" (no overrides) and the JSON literal null both decode to a nil
+		// map, and assigning into a nil map panics. Rebuild it instead: the
+		// override being written is the only state that matters here.
+		if flags == nil {
+			flags = map[string]any{}
 		}
 		flags[name] = value
 		encoded, err := json.Marshal(flags)
