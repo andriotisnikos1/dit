@@ -140,6 +140,52 @@ Credentials are sealed with NaCl secretbox and are **write-only over the API**:
 
 ---
 
+## Behaviour flags
+
+Flags change how dit treats the watches they apply to; they do not change how a
+check itself runs — see **How checks work** below for that. Each flag can be set
+globally and overridden per watch, with the effective value resolved as: watch
+override → global setting → flag default.
+
+```bash
+dit flag list                      # global values, next to each default
+dit flag set history 5             # set a flag globally
+dit flag set history 5 --watch 12  # override it on one watch
+dit flag unset notify_threshold --watch 12
+dit flag list --watch 12           # adds LOCAL and EFFECTIVE columns
+```
+
+| Flag | Type | Default | Applies to | Meaning |
+|---|---|---|---|---|
+| `history` | int | `1` | all watches | Update events to retain per watch, newest first; `-1` keeps all, `0` is rejected. |
+| `notify_threshold` | int | `1` | all watches | Updates to accumulate before notifying; `1` notifies on every update. |
+| `semver` | bool | `false` | pattern watches | Track the highest semver version among matched tags and report version bumps, not every new tag. |
+| `semver_stable` | bool | `false` | pattern watches | In semver mode, ignore prereleases (a `-rc.1` tag never counts). |
+| `semver_notify_threshold` | int | `1` | pattern watches | Semver bumps to accumulate before notifying; independent of `notify_threshold`. |
+
+`dit watch show <id>` prints a `Flags` row with the non-default effective values
+and where each comes from — `(local)` or `(global)` — or `(defaults)` when
+nothing overrides the defaults:
+
+```
+Flags          history=5 (local), notify_threshold=3 (global)
+```
+
+### How they interact
+
+- Retention never drops an event still waiting for its notification: the newest
+  `history` events are kept, or every pending event when there are more of those,
+  so the effective count is `max(history, pending)`.
+- A threshold notification summarises every change it covers: reaching
+  `notify_threshold` over three updates sends one message listing each earlier
+  change and then the firing one, and a retry re-renders that same message.
+- Failure and recovery notifications are never deferred by `notify_threshold`;
+  they fire exactly as they always did.
+- Semver mode seeds silently on activation — enabling it never fires on versions
+  that already exist — and a new tag that is not a higher version is not a bump.
+
+---
+
 ## CLI reference
 
 Config precedence: `--server`/`--token` flags → `DIT_SERVER_URL`/`DIT_API_TOKEN`
@@ -180,10 +226,18 @@ dit creds rm <registry>
 dit events [--limit N] [--watch <id>] [--type <type>]
 dit notifications [--limit N]
 dit notifications retry <id>
+
+dit flag list [--watch <id>]
+dit flag set <name> <value> [--watch <id>]
+dit flag unset <name> [--watch <id>]
 ```
 
 `--tag` is repeatable and creates one watch per tag. Output defaults to aligned
 `tabwriter` tables; `-o json` emits raw API responses for scripting.
+
+`dit flag` acts globally by default; pass `--watch <id>` to read or change one
+watch's override. `dit watch show <id>` prints a `Flags` row with the
+non-default effective values and whether each is `(local)` or `(global)`.
 
 ---
 
@@ -201,6 +255,8 @@ in constant time. `GET /healthz` is unauthenticated.
 | GET/PATCH/DELETE | `/api/v1/watches/{id}` | Read / enable-disable + channels + notify_on_failure / delete |
 | POST | `/api/v1/watches/{id}/check` | Force a check, return the diff |
 | GET | `/api/v1/watches/{id}/events` | Per-watch history |
+| GET | `/api/v1/watches/{id}/flags` | Flags resolved for one watch |
+| PUT/DELETE | `/api/v1/watches/{id}/flags/{name}` | Set a per-watch override (`{"value": …}`) / remove it |
 | GET | `/api/v1/events` | Global event feed; filters `watch`, `type` |
 | GET/POST | `/api/v1/channels` | List / create |
 | GET/PATCH/DELETE | `/api/v1/channels/{id}` | Manage; `PATCH` sets `is_default`, `enabled` |
@@ -209,6 +265,12 @@ in constant time. `GET /healthz` is unauthenticated.
 | PUT/GET/DELETE | `/api/v1/registries/{host}/credentials` | Set / metadata-only read / delete |
 | GET | `/api/v1/notifications` | Delivery log |
 | POST | `/api/v1/notifications/{id}/retry` | Re-deliver a failed notification |
+| GET | `/api/v1/flags` | List flags; `watch` query adds per-watch and effective values |
+| PUT/DELETE | `/api/v1/flags/{name}` | Set a global flag (`{"value": …}`) / remove it |
+
+Flag writes take a scalar body, `{"value": <int|bool>}`. `DELETE` is idempotent
+(`204`); an unknown flag is `404`; an invalid or zero value is `422` carrying the
+parser's message, as is setting a pattern-only flag on a tag watch.
 
 Errors use one envelope:
 
@@ -340,3 +402,15 @@ migrations/*.sql    embedded via go:embed
 - A watch tracks tags, not digests: adding one for a digest-addressed image is
   rejected, because an immutable digest cannot drift.
 - No `/metrics` endpoint; `GET /healthz` is the only unauthenticated surface.
+- Pruning an event also deletes its notification delivery-log rows, since they
+  reference the event. A history prune can therefore retire a very old failed
+  delivery so that `dit notifications retry` no longer applies to it.
+- An update event batches at most what retention still holds. Discarding pending
+  updates happens only if an operator lowers retention below the count of
+  undelivered updates; retention always protects pending events, so this is rare.
+- A watch with `semver` on does not report ordinary new tags. To get both, use
+  two watches on the same repository with different patterns — e.g. a `v*`
+  pattern with semver on and a broader pattern without — since watches are
+  unique per (registry, repository, kind, ref).
+- Semver mode ignores every tag that does not parse as semver, including tags
+  the glob matched.
