@@ -58,3 +58,14 @@ func SemverBump(stored string, candidate SemverCandidate) bool {
 	}
 	return newV.GreaterThan(oldV)
 }
+
+// StoredVersionParseable reports whether a persisted latest_semver value can
+// still be compared. A value that cannot be parsed would otherwise freeze
+// semver bump reporting forever (the seed only runs on an empty value).
+func StoredVersionParseable(stored string) bool {
+	if stored == "" {
+		return true
+	}
+	_, err := semver.NewVersion(stored)
+	return err == nil
+}

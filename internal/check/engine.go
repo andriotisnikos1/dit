@@ -186,7 +186,10 @@ func (e *Engine) recordChange(ctx context.Context, watch *store.WatchRecord, set
 		pending = watch.PendingSemverCount + 1
 	}
 
-	if threshold > 1 && pending >= threshold {
+	// A threshold lowered to 1 with accumulated pending events must still
+	// flush them as one batch; a normal threshold-1 flow has pending == 1 so
+	// it never fetches and stays byte-identical to legacy behavior.
+	if pending >= threshold && pending > 1 {
 		prior, err := e.store.RecentEvents(ctx, watch.ID, batchTypes, pending-1)
 		if err != nil {
 			return nil, 0, err
@@ -513,6 +516,16 @@ func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, tri
 		return e.checkPatternSemver(ctx, watch, repo, auth, outcome.Matched, result, settings)
 	}
 
+	// Self-heal: semver mode was toggled off with bumps still pending. Their
+	// events flush with the next change batch (ChangeEventTypes includes
+	// semver_new_tag), so the stale counter must not keep inflating the
+	// history retention.
+	if watch.PendingSemverCount > 0 {
+		if err := e.store.ResetPendingCount(ctx, watch.ID, store.PendingSemverCount); err != nil {
+			return nil, err
+		}
+	}
+
 	if outcome.Baseline {
 		e.log.Debug("pattern baseline recorded", "watch", watch.ID, "image", watch.Image,
 			"pattern", watch.Ref, "tags", len(outcome.Matched))
@@ -665,10 +678,14 @@ func (e *Engine) checkPatternSemver(ctx context.Context, watch *store.WatchRecor
 		return result, nil
 	}
 
-	if watch.LatestSemver == "" {
+	if watch.LatestSemver == "" || !StoredVersionParseable(watch.LatestSemver) {
 		// Seeding the highest version present is the semver baseline, in the
 		// same spirit as a tag watch's first digest: activation must not fire
 		// on what already exists (migration 0002's rule).
+		if watch.LatestSemver != "" {
+			e.log.Warn("stored latest_semver is unparseable; reseeding from the current highest version",
+				"watch", watch.ID, "stored", watch.LatestSemver)
+		}
 		if err := e.store.SetLatestSemver(ctx, watch.ID, top.Version, top.Tag); err != nil {
 			return nil, err
 		}
@@ -680,8 +697,9 @@ func (e *Engine) checkPatternSemver(ctx context.Context, watch *store.WatchRecor
 		return result, nil
 	}
 
+	previous := watch.LatestSemver
 	e.log.Info("semver bump", "watch", watch.ID, "image", watch.Image,
-		"from", watch.LatestSemver, "to", top.Version)
+		"from", previous, "to", top.Version)
 	// State before the event, matching the existing pattern: a delivery
 	// failure must not cause the same bump to be reported again.
 	if err := e.store.SetLatestSemver(ctx, watch.ID, top.Version, top.Tag); err != nil {
@@ -699,7 +717,7 @@ func (e *Engine) checkPatternSemver(ctx context.Context, watch *store.WatchRecor
 			NewDigest: digest,
 			Detail: map[string]any{
 				"pattern":  watch.Ref,
-				"previous": watch.LatestSemver,
+				"previous": previous,
 				"version":  top.Version,
 			},
 		})

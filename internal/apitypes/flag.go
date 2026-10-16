@@ -32,5 +32,5 @@ type FlagList []Flag
 // SetFlagRequest is the body of the flag PUT endpoints. Value must be a
 // JSON scalar matching the flag's type; use the DELETE endpoint to unset.
 type SetFlagRequest struct {
-	Value any `json:"value"`
+	Value any `json:"value" yaml:"value"`
 }

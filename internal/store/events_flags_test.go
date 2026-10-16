@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
+	"github.com/andriotisnikos1/dit/internal/notify"
 	"github.com/andriotisnikos1/dit/internal/store"
 	"github.com/andriotisnikos1/dit/internal/testutil"
 )
@@ -101,5 +102,50 @@ func TestPruneWatchEventsKeepsNewestPerFamily(t *testing.T) {
 	}
 	if _, total, err = db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 100}); err != nil || total != 0 {
 		t.Errorf("after wipe: (%d, %v), want 0 events", total, err)
+	}
+}
+
+func TestPruningEventsCascadesNotificationRows(t *testing.T) {
+	db := testutil.Store(t)
+	ctx := context.Background()
+	watch := testutil.Watch(t, db, testutil.DockerHub, "library/nginx", "1.27", nil)
+
+	// Events need spacing: created_at ties break on random IDs.
+	eventAt(t, db, watch.ID, apitypes.EventDigestChanged, "one")
+	eventAt(t, db, watch.ID, apitypes.EventDigestChanged, "two")
+
+	// Notification rows referencing both events (a channel must exist first).
+	builder := notify.NewFakeBuilder()
+	channel, _ := testutil.Channel(t, db, builder, "ops", true)
+	events, _, err := db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	for _, e := range events {
+		if _, err := db.CreateNotification(ctx, e.ID, channel.ID); err != nil {
+			t.Fatalf("CreateNotification: %v", err)
+		}
+	}
+
+	// keep=1 prunes the older event; its notification row must cascade away.
+	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1); err != nil {
+		t.Fatalf("PruneWatchEvents: %v", err)
+	}
+	notifications, total, err := db.ListNotifications(ctx, store.NotificationFilter{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListNotifications: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("kept %d notification rows, want 1 (the surviving event's)", total)
+	}
+	remaining, _, err := db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(remaining) != 1 || notifications[0].EventID != remaining[0].ID {
+		t.Errorf("notification row %q does not match the surviving event %v", notifications[0].EventID, remaining)
 	}
 }

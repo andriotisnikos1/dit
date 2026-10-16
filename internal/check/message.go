@@ -132,7 +132,7 @@ func Body(watch *store.WatchRecord, event *store.EventRecord) string {
 		}
 	}
 	if entries := batchEntriesOf(event); len(entries) > 0 {
-		fmt.Fprintf(&b, "Earlier changes in this batch (%d):\n", batchCount(event)-1)
+		fmt.Fprintf(&b, "Earlier changes in this batch (%d):\n", len(entries))
 		for _, entry := range entries {
 			fmt.Fprintf(&b, "  - %v %v", entry["at"], entry["type"])
 			if tag, _ := entry["tag"].(string); tag != "" {
