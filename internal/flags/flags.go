@@ -42,6 +42,11 @@ type Definition struct {
 
 func ptr(n int) *int { return &n }
 
+// minInt64Float is 2^63 as a float64: the exclusive upper bound of the int64
+// range and the exact value of math.MinInt64. Comparing against it before a
+// float64→int conversion avoids Go's implementation-dependent overflow result.
+const minInt64Float = float64(1 << 63)
+
 // Definitions lists every flag, in stable display order.
 func Definitions() []Definition {
 	return []Definition{
@@ -129,9 +134,17 @@ func parseInt(def Definition, raw any) (int, error) {
 	case int64:
 		n = int(v)
 	case float64:
-		// JSON numbers decode as float64; the value must be integral.
-		if v != math.Trunc(v) {
+		// JSON numbers decode as float64; the value must be integral and must
+		// fit in an int. Checking the range first matters: converting a float
+		// that is out of range is implementation-dependent in Go and saturates
+		// on amd64 (1e30 becomes math.MaxInt64), which would silently store an
+		// extreme value instead of rejecting the request the way strconv.Atoi
+		// already does for an out-of-range string.
+		if math.IsNaN(v) || v != math.Trunc(v) {
 			return 0, fmt.Errorf("flags: %s expects an integer, got %v", def.Name, v)
+		}
+		if v >= minInt64Float || v < -minInt64Float {
+			return 0, fmt.Errorf("flags: %s expects an integer, got %v (out of range)", def.Name, v)
 		}
 		n = int(v)
 	case string:
