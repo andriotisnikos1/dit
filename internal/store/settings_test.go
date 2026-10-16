@@ -26,6 +26,18 @@ func TestSettingsRoundTrip(t *testing.T) {
 		t.Errorf("settings = %v, want history=5 notify_threshold=3", got)
 	}
 
+	// Re-setting a key must overwrite (the ON CONFLICT upsert branch).
+	if err := db.SetSetting(ctx, "history", "7"); err != nil {
+		t.Fatalf("SetSetting overwrite: %v", err)
+	}
+	got, err = db.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if got["history"] != "7" {
+		t.Errorf("history = %v after overwrite, want 7", got["history"])
+	}
+
 	if err := db.UnsetSetting(ctx, "history"); err != nil {
 		t.Fatalf("UnsetSetting: %v", err)
 	}
