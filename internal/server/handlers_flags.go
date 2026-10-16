@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
 	"github.com/andriotisnikos1/dit/internal/flags"
@@ -114,7 +115,9 @@ func (s *Server) handleListFlags(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var watch *store.WatchRecord
-	if raw := r.URL.Query().Get("watch"); raw != "" {
+	// Trim like the event listing does: a watch ID pasted with a stray space
+	// must resolve to the same watch, not to a 404.
+	if raw := strings.TrimSpace(r.URL.Query().Get("watch")); raw != "" {
 		var err error
 		if watch, err = s.store.GetWatch(ctx, raw); err != nil {
 			writeStoreError(w, r, err, "watch", s.log)
