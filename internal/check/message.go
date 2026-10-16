@@ -31,6 +31,9 @@ func BuildMessage(watch *store.WatchRecord, event *store.EventRecord) notify.Mes
 // Title is the one-line summary shown as the email subject or ntfy title.
 func Title(watch *store.WatchRecord, event *store.EventRecord) string {
 	image := imageOf(watch, event)
+	if n := batchCount(event); n > 1 {
+		return fmt.Sprintf("%d changes: %s", n, image)
+	}
 	switch event.Type {
 	case apitypes.EventDigestChanged:
 		// imageOf already carries the tag for a tag watch, so only append the
@@ -38,6 +41,8 @@ func Title(watch *store.WatchRecord, event *store.EventRecord) string {
 		return "digest changed: " + withRef(image, event.Tag)
 	case apitypes.EventNewTags:
 		return fmt.Sprintf("new tags: %s (%s)", repositoryOf(watch, image), event.Tag)
+	case apitypes.EventSemverNewTag:
+		return fmt.Sprintf("new version: %s %s", repositoryOf(watch, image), event.Tag)
 	case apitypes.EventCheckFailed:
 		return "check failed: " + image
 	case apitypes.EventCheckRecovered:
@@ -107,6 +112,14 @@ func Body(watch *store.WatchRecord, event *store.EventRecord) string {
 				fmt.Fprintf(&b, "  - %s\n", t.Tag)
 			}
 		}
+	case apitypes.EventSemverNewTag:
+		if v := detailString(event, "previous"); v != "" {
+			writeLine("Previous version", v)
+		}
+		if v := detailString(event, "version"); v != "" {
+			writeLine("New version", v)
+		}
+		writeLine("New digest", event.NewDigest)
 	case apitypes.EventCheckFailed, apitypes.EventCheckRecovered:
 		if detail := detailString(event, "error"); detail != "" {
 			writeLine("Error", detail)
@@ -118,6 +131,33 @@ func Body(watch *store.WatchRecord, event *store.EventRecord) string {
 			writeLine("Consecutive failures", fmt.Sprintf("%d", watch.ConsecutiveFailures))
 		}
 	}
+	if entries := batchEntriesOf(event); len(entries) > 0 {
+		fmt.Fprintf(&b, "Earlier changes in this batch (%d):\n", batchCount(event)-1)
+		for _, entry := range entries {
+			fmt.Fprintf(&b, "  - %v %v", entry["at"], entry["type"])
+			if tag, _ := entry["tag"].(string); tag != "" {
+				fmt.Fprintf(&b, " %s", tag)
+			}
+			if old, _ := entry["old_digest"].(string); old != "" {
+				fmt.Fprintf(&b, " %s", old)
+			}
+			if new, _ := entry["new_digest"].(string); new != "" {
+				fmt.Fprintf(&b, " -> %s", new)
+			}
+			if raw, ok := entry["new_tags"].([]any); ok && len(raw) > 0 {
+				names := make([]string, 0, len(raw))
+				for _, t := range raw {
+					if s, ok := t.(string); ok {
+						names = append(names, s)
+					}
+				}
+				if len(names) > 0 {
+					fmt.Fprintf(&b, " new tags: %s", strings.Join(names, ", "))
+				}
+			}
+			fmt.Fprintf(&b, "\n")
+		}
+	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -125,6 +165,8 @@ func Body(watch *store.WatchRecord, event *store.EventRecord) string {
 func Priority(t apitypes.EventType) string {
 	switch t {
 	case apitypes.EventDigestChanged, apitypes.EventNewTags:
+		return "default"
+	case apitypes.EventSemverNewTag:
 		return "default"
 	case apitypes.EventCheckFailed:
 		return "high"
@@ -142,6 +184,8 @@ func Tags(t apitypes.EventType) []string {
 		return []string{"whale", "package"}
 	case apitypes.EventNewTags:
 		return []string{"package", "sparkles"}
+	case apitypes.EventSemverNewTag:
+		return []string{"package", "rocket"}
 	case apitypes.EventCheckFailed:
 		return []string{"warning"}
 	case apitypes.EventCheckRecovered:
@@ -214,6 +258,95 @@ func shortDigest(d string) string {
 		return "sha256:" + d[:12]
 	}
 	return "sha256:" + d
+}
+
+// batchDetail builds the "batch" detail entry that makes a threshold-firing
+// event carry the summary of the whole batch, so delivery and any later retry
+// render the same message. prior are the older events of the batch, newest
+// first; the firing event itself is the last entry (count = prior + 1).
+func batchDetail(prior []*store.EventRecord) map[string]any {
+	entries := make([]any, 0, len(prior))
+	for i := len(prior) - 1; i >= 0; i-- { // oldest first
+		e := prior[i]
+		entry := map[string]any{
+			"type": string(e.Type),
+			"tag":  e.Tag,
+			"at":   e.CreatedAt.UTC().Format(time.RFC3339),
+		}
+		if e.OldDigest != "" {
+			entry["old_digest"] = e.OldDigest
+		}
+		if e.NewDigest != "" {
+			entry["new_digest"] = e.NewDigest
+		}
+		if tags := newTagsOf(e); len(tags) > 0 {
+			names := make([]any, 0, len(tags))
+			for _, t := range tags {
+				names = append(names, t.Tag)
+			}
+			entry["new_tags"] = names
+		}
+		entries = append(entries, entry)
+	}
+	return map[string]any{
+		"batch": map[string]any{
+			"count":   len(prior) + 1,
+			"entries": entries,
+		},
+	}
+}
+
+// batchCount returns the batch size recorded on a firing event, 0 when the
+// event is not a batch summary.
+func batchCount(event *store.EventRecord) int {
+	if event.Detail == nil {
+		return 0
+	}
+	raw, ok := event.Detail["batch"]
+	if !ok {
+		return 0
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch v := m["count"].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+// batchEntriesOf extracts the prior batch entries from a firing event's
+// detail. The detail map went through JSON, so nested objects arrive as any.
+func batchEntriesOf(event *store.EventRecord) []map[string]any {
+	if event.Detail == nil {
+		return nil
+	}
+	raw, ok := event.Detail["batch"]
+	if !ok {
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	list, ok := m["entries"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // classifyCause maps a registry or internal error onto a failure kind for the

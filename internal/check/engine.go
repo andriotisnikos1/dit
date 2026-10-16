@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 
 	"github.com/andriotisnikos1/dit/internal/apitypes"
+	"github.com/andriotisnikos1/dit/internal/flags"
 	"github.com/andriotisnikos1/dit/internal/notify"
 	"github.com/andriotisnikos1/dit/internal/registry"
 	"github.com/andriotisnikos1/dit/internal/store"
@@ -150,6 +151,108 @@ func (e *Engine) LastTick() *time.Time { return e.lastTick.Load() }
 // NextTick returns when the next tick is scheduled, if any.
 func (e *Engine) NextTick() *time.Time { return e.nextTick.Load() }
 
+// settingsFor resolves the effective flags for a watch: local overrides win
+// over global values, which win over the defaults.
+func (e *Engine) settingsFor(ctx context.Context, watch *store.WatchRecord) (flags.Settings, error) {
+	global, err := e.store.GetSettings(ctx)
+	if err != nil {
+		return flags.Settings{}, fmt.Errorf("load global settings: %w", err)
+	}
+	asAny := make(map[string]any, len(global))
+	for k, v := range global {
+		asAny[k] = v
+	}
+	settings, err := flags.Resolve(watch.Flags, asAny)
+	if err != nil {
+		// Stored values were validated when written; unresolvable state falls
+		// back to defaults rather than failing every check.
+		e.log.Warn("resolve flags", "watch", watch.ID, "error", err)
+		return flags.DefaultSettings(), nil
+	}
+	return settings, nil
+}
+
+// recordChange records a change event, applies threshold batching on the
+// given pending counter, and prunes the event history.
+//
+// When this event completes a threshold batch, the prior batch events are
+// read BEFORE the event is created and folded into its detail under a
+// "batch" key — so the notification and any later retry render the same
+// message. It returns the created event and how many channels it was
+// delivered to (0 while below the threshold).
+func (e *Engine) recordChange(ctx context.Context, watch *store.WatchRecord, settings flags.Settings, counter string, threshold int, batchTypes []apitypes.EventType, in store.CreateEventInput) (*store.EventRecord, int, error) {
+	pending := watch.PendingNotifyCount + 1
+	if counter == store.PendingSemverCount {
+		pending = watch.PendingSemverCount + 1
+	}
+
+	if threshold > 1 && pending >= threshold {
+		prior, err := e.store.RecentEvents(ctx, watch.ID, batchTypes, pending-1)
+		if err != nil {
+			return nil, 0, err
+		}
+		if in.Detail == nil {
+			in.Detail = map[string]any{}
+		}
+		in.Detail["batch"] = batchDetail(prior)["batch"]
+	}
+
+	event, err := e.store.CreateEvent(ctx, in)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	count, err := e.store.IncrementPendingCount(ctx, watch.ID, counter, 1)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	notified := 0
+	if count >= threshold {
+		notified = e.deliver(ctx, watch, event)
+		if err := e.store.ResetPendingCount(ctx, watch.ID, counter); err != nil {
+			return nil, 0, err
+		}
+		count = 0
+	}
+
+	// Prune with the post-check counter values, so events still waiting for
+	// their notification are never pruned.
+	pendingNotify, pendingSemver := watch.PendingNotifyCount, watch.PendingSemverCount
+	if counter == store.PendingNotifyCount {
+		pendingNotify = count
+	} else {
+		pendingSemver = count
+	}
+	if err := e.pruneHistory(ctx, watch.ID, pendingNotify, pendingSemver, settings); err != nil {
+		return nil, 0, err
+	}
+	return event, notified, nil
+}
+
+// pruneHistory applies the history flag: keep the newest max(history,
+// pending) update events and failure events. history of -1 keeps everything.
+func (e *Engine) pruneHistory(ctx context.Context, watchID string, pendingNotify, pendingSemver int, settings flags.Settings) error {
+	if settings.History < 0 {
+		return nil
+	}
+	keep := settings.History
+	if pendingNotify > keep {
+		keep = pendingNotify
+	}
+	if pendingSemver > keep {
+		keep = pendingSemver
+	}
+	pruned, err := e.store.PruneWatchEvents(ctx, watchID, keep)
+	if err != nil {
+		return err
+	}
+	if pruned > 0 {
+		e.log.Debug("pruned event history", "watch", watchID, "kept", keep, "pruned", pruned)
+	}
+	return nil
+}
+
 // Run drives the scheduler until ctx is cancelled. It returns when the
 // context is done.
 func (e *Engine) Run(ctx context.Context) error {
@@ -260,19 +363,23 @@ func (e *Engine) CheckWatch(ctx context.Context, watchID string, trigger Trigger
 // checkTag resolves a pinned tag and reports digest drift.
 func (e *Engine) checkTag(ctx context.Context, watch *store.WatchRecord, trigger Trigger) (*apitypes.CheckResult, error) {
 	result := &apitypes.CheckResult{WatchID: watch.ID, Tag: watch.Ref}
+	settings, err := e.settingsFor(ctx, watch)
+	if err != nil {
+		return nil, err
+	}
 
 	ref, err := registry.ParseTagRef(watch.Registry+"/"+watch.Repository, watch.Ref)
 	if err != nil {
-		return e.recordFailure(ctx, watch, result, fmt.Errorf("parse tag reference: %w", err))
+		return e.recordFailure(ctx, watch, result, settings, fmt.Errorf("parse tag reference: %w", err))
 	}
 	auth, err := e.authenticator(ctx, watch.Registry)
 	if err != nil {
-		return e.recordFailure(ctx, watch, result, err)
+		return e.recordFailure(ctx, watch, result, settings, err)
 	}
 
 	digest, err := e.registry.ResolveDigest(ctx, ref, auth)
 	if err != nil {
-		return e.recordFailure(ctx, watch, result, err)
+		return e.recordFailure(ctx, watch, result, settings, err)
 	}
 
 	outcome := DiffTag(!watch.HasBaseline(), watch.LastDigest, digest.String())
@@ -286,7 +393,7 @@ func (e *Engine) checkTag(ctx context.Context, watch *store.WatchRecord, trigger
 		return nil, err
 	}
 	if recovered {
-		e.emitRecovered(ctx, watch)
+		e.emitRecovered(ctx, watch, settings)
 	}
 
 	if outcome.Baseline {
@@ -299,39 +406,45 @@ func (e *Engine) checkTag(ctx context.Context, watch *store.WatchRecord, trigger
 		return result, nil
 	}
 
-	event, err := e.store.CreateEvent(ctx, store.CreateEventInput{
-		WatchID:   watch.ID,
-		Type:      apitypes.EventDigestChanged,
-		Tag:       watch.Ref,
-		OldDigest: outcome.OldDigest,
-		NewDigest: outcome.Digest,
-	})
+	e.log.Info("digest changed", "watch", watch.ID, "image", watch.Image,
+		"ref", watch.Ref, "old", outcome.OldDigest, "new", outcome.Digest)
+	event, notified, err := e.recordChange(ctx, watch, settings,
+		store.PendingNotifyCount, settings.NotifyThreshold, apitypes.ChangeEventTypes(),
+		store.CreateEventInput{
+			WatchID:   watch.ID,
+			Type:      apitypes.EventDigestChanged,
+			Tag:       watch.Ref,
+			OldDigest: outcome.OldDigest,
+			NewDigest: outcome.Digest,
+		})
 	if err != nil {
 		return nil, err
 	}
 	result.EventID = event.ID
-	e.log.Info("digest changed", "watch", watch.ID, "image", watch.Image,
-		"ref", watch.Ref, "old", outcome.OldDigest, "new", outcome.Digest)
-	result.Notified = e.deliver(ctx, watch, event)
+	result.Notified = notified
 	return result, nil
 }
 
 // checkPattern lists tags, reports new matches and prunes vanished ones.
 func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, trigger Trigger) (*apitypes.CheckResult, error) {
 	result := &apitypes.CheckResult{WatchID: watch.ID, Tag: watch.Ref}
+	settings, err := e.settingsFor(ctx, watch)
+	if err != nil {
+		return nil, err
+	}
 
 	repo, err := registry.ParseRepositoryRef(watch.Registry, watch.Repository)
 	if err != nil {
-		return e.recordFailure(ctx, watch, result, fmt.Errorf("parse repository reference: %w", err))
+		return e.recordFailure(ctx, watch, result, settings, fmt.Errorf("parse repository reference: %w", err))
 	}
 	auth, err := e.authenticator(ctx, watch.Registry)
 	if err != nil {
-		return e.recordFailure(ctx, watch, result, err)
+		return e.recordFailure(ctx, watch, result, settings, err)
 	}
 
 	listed, err := e.registry.ListTags(ctx, repo, auth)
 	if err != nil {
-		return e.recordFailure(ctx, watch, result, err)
+		return e.recordFailure(ctx, watch, result, settings, err)
 	}
 
 	known, err := e.store.KnownTags(ctx, watch.ID)
@@ -390,7 +503,7 @@ func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, tri
 		return nil, err
 	}
 	if recovered {
-		e.emitRecovered(ctx, watch)
+		e.emitRecovered(ctx, watch, settings)
 	}
 
 	if outcome.Baseline {
@@ -398,30 +511,37 @@ func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, tri
 			"pattern", watch.Ref, "tags", len(outcome.Matched))
 		return result, nil
 	}
+
+	// Semver mode replaces the new-tags report with version bumps.
+	if settings.Semver {
+		return e.checkPatternSemver(ctx, watch, repo, auth, outcome.Matched, result, settings)
+	}
+
 	if len(outcome.NewTags) == 0 {
 		e.log.Debug("no new tags", "watch", watch.ID, "image", watch.Image, "matched", len(outcome.Matched))
 		return result, nil
 	}
 
-	detail := map[string]any{
-		"pattern":  watch.Ref,
-		"new_tags": resolved,
-		"count":    len(resolved),
-	}
-	event, err := e.store.CreateEvent(ctx, store.CreateEventInput{
-		WatchID: watch.ID,
-		Type:    apitypes.EventNewTags,
-		Tag:     watch.Ref,
-		Detail:  detail,
-	})
+	e.log.Info("new tags", "watch", watch.ID, "image", watch.Image,
+		"pattern", watch.Ref, "count", len(resolved))
+	event, notified, err := e.recordChange(ctx, watch, settings,
+		store.PendingNotifyCount, settings.NotifyThreshold, apitypes.ChangeEventTypes(),
+		store.CreateEventInput{
+			WatchID: watch.ID,
+			Type:    apitypes.EventNewTags,
+			Tag:     watch.Ref,
+			Detail: map[string]any{
+				"pattern":  watch.Ref,
+				"new_tags": resolved,
+				"count":    len(resolved),
+			},
+		})
 	if err != nil {
 		return nil, err
 	}
 	result.EventID = event.ID
 	result.NewTags = resolved
-	e.log.Info("new tags", "watch", watch.ID, "image", watch.Image,
-		"pattern", watch.Ref, "count", len(resolved))
-	result.Notified = e.deliver(ctx, watch, event)
+	result.Notified = notified
 	return result, nil
 }
 
@@ -441,7 +561,7 @@ func (e *Engine) resolveTagDigest(ctx context.Context, repo name.Repository, tag
 }
 
 // recordFailure stores a failed check and emits check_failed once per outage.
-func (e *Engine) recordFailure(ctx context.Context, watch *store.WatchRecord, result *apitypes.CheckResult, cause error) (*apitypes.CheckResult, error) {
+func (e *Engine) recordFailure(ctx context.Context, watch *store.WatchRecord, result *apitypes.CheckResult, settings flags.Settings, cause error) (*apitypes.CheckResult, error) {
 	msg := cause.Error()
 	result.Error = msg
 
@@ -474,12 +594,15 @@ func (e *Engine) recordFailure(ctx context.Context, watch *store.WatchRecord, re
 		} else {
 			e.log.Debug("failure notification suppressed", "watch", watch.ID)
 		}
+		if err := e.pruneHistory(ctx, watch.ID, watch.PendingNotifyCount, watch.PendingSemverCount, settings); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
 
 // emitRecovered records the return to health after a run of failures.
-func (e *Engine) emitRecovered(ctx context.Context, watch *store.WatchRecord) {
+func (e *Engine) emitRecovered(ctx context.Context, watch *store.WatchRecord, settings flags.Settings) {
 	event, err := e.store.CreateEvent(ctx, store.CreateEventInput{
 		WatchID: watch.ID,
 		Type:    apitypes.EventCheckRecovered,
@@ -494,6 +617,9 @@ func (e *Engine) emitRecovered(ctx context.Context, watch *store.WatchRecord) {
 		"failures", watch.ConsecutiveFailures)
 	if watch.NotifyOnFailure {
 		e.deliver(ctx, watch, event)
+	}
+	if err := e.pruneHistory(ctx, watch.ID, watch.PendingNotifyCount, watch.PendingSemverCount, settings); err != nil {
+		e.log.Error("prune event history", "watch", watch.ID, "error", err)
 	}
 }
 
@@ -523,4 +649,15 @@ func (e *Engine) lockWatch(watchID string) func() {
 
 	mu.Lock()
 	return mu.Unlock
+}
+
+// checkPatternSemver is implemented in the semver task; until then semver
+// mode is unreachable (no API to set the flag on a watch exists yet).
+func (e *Engine) checkPatternSemver(ctx context.Context, watch *store.WatchRecord, repo name.Repository, auth authn.Authenticator, matched []string, result *apitypes.CheckResult, settings flags.Settings) (*apitypes.CheckResult, error) {
+	_ = ctx
+	_ = repo
+	_ = auth
+	_ = matched
+	_ = settings
+	return result, nil
 }
