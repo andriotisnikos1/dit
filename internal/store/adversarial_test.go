@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -702,6 +704,380 @@ func TestSetLatestSemverState(t *testing.T) {
 	if got, _ = db.GetWatch(ctx, watch.ID); got.PendingSemverCount != 2 || got.LatestSemver != "2.0.0" {
 		t.Errorf("state = %+v, want pending 2 with 2.0.0", got)
 	}
+}
+
+// claim: migration 0004 does not rebuild any table and does not touch a CHECK
+// constraint — child rows, the watch unique index and the kind CHECK all
+// survive applying the real migration body to a populated pre-0004 database.
+func TestMigration0004DoesNotRebuildOrRelaxConstraints(t *testing.T) {
+	ctx := context.Background()
+	legacy, err := store.Open(ctx, store.Options{
+		Path:       filepath.Join(t.TempDir(), "legacy.db"),
+		Sealer:     testutil.Sealer(t),
+		Migrations: migrationsThrough(t, "0003_channel_email_http.sql"),
+	})
+	if err != nil {
+		t.Fatalf("open a pre-0004 store: %v", err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+	raw := legacy.SQL()
+
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := raw.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("setup exec: %v", err)
+		}
+	}
+	exec(`INSERT INTO watches (id, image, registry, repository, kind, ref, enabled,
+			notify_on_failure, last_digest, last_error, consecutive_failures,
+			next_attempt_at, created_at, updated_at)
+		VALUES ('w1', 'index.docker.io/library/nginx:1.27', 'index.docker.io',
+			'library/nginx', 'tag', '1.27', 1, 1, 'sha256:abc', '', 0, ?, ?, ?)`, now, now, now)
+	exec(`INSERT INTO channels (id, name, type, config_json, enabled, is_default, created_at, updated_at)
+		VALUES ('c1', 'ops', 'ntfy', '{}', 1, 1, ?, ?)`, now, now)
+	exec(`INSERT INTO watch_channels (watch_id, channel_id) VALUES ('w1', 'c1')`)
+	exec(`INSERT INTO watch_tags (watch_id, tag, digest, first_seen_at) VALUES ('w1', '1.27', 'sha256:abc', ?)`, now)
+	exec(`INSERT INTO events (id, watch_id, type, tag, old_digest, new_digest, detail_json, created_at)
+		VALUES ('e1', 'w1', 'digest_changed', '1.27', 'sha256:old', 'sha256:abc', '', ?)`, now)
+	exec(`INSERT INTO notifications (id, event_id, channel_id, status, attempts, last_error, created_at)
+		VALUES ('n1', 'e1', 'c1', 'sent', 1, '', ?)`, now)
+
+	before := map[string]int{}
+	for _, table := range []string{"watches", "watch_tags", "watch_channels", "channels", "events", "notifications"} {
+		var n int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		before[table] = n
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0004_flags.sql"))
+	if err != nil {
+		t.Fatalf("read migration 0004: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, string(body)); err != nil {
+		t.Fatalf("apply 0004: %v", err)
+	}
+
+	for _, table := range []string{"watches", "watch_tags", "watch_channels", "channels", "events", "notifications"} {
+		var n int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if n != before[table] {
+			t.Errorf("%s: %d rows before 0004, %d after — a table rebuild dropped data", table, before[table], n)
+		}
+	}
+
+	// The unique index that enforces one watch per natural key must survive.
+	var indexCount int
+	if err := raw.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_watches_unique'`).
+		Scan(&indexCount); err != nil {
+		t.Fatalf("inspect indexes: %v", err)
+	}
+	if indexCount != 1 {
+		t.Error("idx_watches_unique did not survive migration 0004")
+	}
+
+	// The kind CHECK must still reject an unknown kind.
+	if _, err := raw.ExecContext(ctx, `
+		INSERT INTO watches (id, image, registry, repository, kind, ref, enabled,
+			notify_on_failure, last_digest, last_error, consecutive_failures,
+			next_attempt_at, created_at, updated_at)
+		VALUES ('w2', 'img', 'reg', 'repo', 'carrier-pigeon', 'r', 1, 1, '', '', 0, ?, ?, ?)`,
+		now, now, now); err == nil {
+		t.Error("the watches.kind CHECK no longer rejects an unknown kind after 0004")
+	}
+
+	// And every notification row still points at its event.
+	var orphaned int
+	if err := raw.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM notifications n
+		LEFT JOIN events e ON e.id = n.event_id WHERE e.id IS NULL`).Scan(&orphaned); err != nil {
+		t.Fatalf("check notifications: %v", err)
+	}
+	if orphaned != 0 {
+		t.Errorf("%d notification rows lost their event", orphaned)
+	}
+
+	// The settings table shape the code depends on: key is the unique key,
+	// value and updated_at are NOT NULL (the upsert in SetSetting relies on
+	// the primary key's uniqueness).
+	rows, err := raw.QueryContext(ctx, `PRAGMA table_info(settings)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(settings): %v", err)
+	}
+	defer rows.Close()
+	shape := map[string]struct {
+		notNull bool
+		pk      int
+	}{}
+	for rows.Next() {
+		var (
+			cid, notNull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan PRAGMA row: %v", err)
+		}
+		shape[name] = struct {
+			notNull bool
+			pk      int
+		}{notNull == 1, pk}
+	}
+	if len(shape) != 3 {
+		t.Fatalf("settings has %d columns, want 3: %v", len(shape), shape)
+	}
+	if c, ok := shape["key"]; !ok || c.pk != 1 {
+		t.Errorf("settings.key = %+v, want the PRIMARY KEY", c)
+	}
+	for _, col := range []string{"value", "updated_at"} {
+		if c, ok := shape[col]; !ok || !c.notNull {
+			t.Errorf("settings.%s = %+v, want NOT NULL", col, c)
+		}
+	}
+	// Uniqueness is enforced, and SetSetting upserts rather than duplicating.
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO settings (key, value, updated_at) VALUES ('history', '1', ?)`, now); err != nil {
+		t.Fatalf("first settings insert: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO settings (key, value, updated_at) VALUES ('history', '2', ?)`, now); err == nil {
+		t.Error("a duplicate settings key was accepted; the table has no unique key")
+	}
+	if err := legacy.SetSetting(ctx, "history", "3"); err != nil {
+		t.Fatalf("SetSetting upsert: %v", err)
+	}
+	got, err := legacy.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if got["history"] != "3" {
+		t.Errorf("history = %q after the upsert, want 3", got["history"])
+	}
+}
+
+// claim: the migration body itself is not re-runnable (ADD COLUMN is not
+// idempotent), so re-application must fail loudly and leave the database
+// untouched — the schema_migrations guard in Migrate is the boundary that keeps
+// it from ever happening.
+func TestMigration0004BodyReApplicationFailsCleanly(t *testing.T) {
+	db := testutil.Store(t)
+	ctx := context.Background()
+	watch := testutil.Watch(t, db, testutil.DockerHub, "library/nginx", "1.27", nil)
+	if err := db.SetWatchFlag(ctx, watch.ID, "history", 5); err != nil {
+		t.Fatalf("SetWatchFlag: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0004_flags.sql"))
+	if err != nil {
+		t.Fatalf("read migration 0004: %v", err)
+	}
+	tx, err := db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	_, execErr := tx.ExecContext(ctx, string(body))
+	if execErr == nil {
+		_ = tx.Rollback()
+		t.Fatal("re-applying 0004 succeeded; ALTER TABLE ADD COLUMN should report a duplicate column")
+	}
+	if rbErr := tx.Rollback(); rbErr != nil {
+		t.Fatalf("rollback: %v", rbErr)
+	}
+	t.Logf("observed: re-applying the 0004 body fails with %v and rolls back", execErr)
+
+	// Nothing was lost, and the flag written before the attempt is intact.
+	got, err := db.GetWatch(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("GetWatch after the failed re-apply: %v", err)
+	}
+	if v, _ := got.Flags["history"].(float64); v != 5 {
+		t.Errorf("history = %#v after the failed re-apply, want 5", got.Flags["history"])
+	}
+	if err := db.SetSetting(ctx, "semver", "true"); err != nil {
+		t.Errorf("settings table unusable after the failed re-apply: %v", err)
+	}
+	applied, err := db.AppliedMigrations(ctx)
+	if err != nil {
+		t.Fatalf("AppliedMigrations: %v", err)
+	}
+	if _, ok := applied["0004_flags"]; !ok {
+		t.Error("0004_flags is no longer recorded as applied")
+	}
+}
+
+// claim: whatever scalar form the store is handed, GetWatch returns the JSON
+// decoding of it and flags.Resolve turns that back into the same typed value —
+// int, int64 and float64 all land as numbers and resolve as ints, bool stays a
+// bool, and a stringified value (as a YAML-driven writer would send it) still
+// resolves because ParseValue accepts strings.
+func TestWatchFlagValueJSONRoundTripByType(t *testing.T) {
+	db := testutil.Store(t)
+	ctx := context.Background()
+	watch := testutil.Watch(t, db, testutil.DockerHub, "library/nginx", "1.27", nil)
+
+	writes := []struct {
+		name string
+		raw  any
+	}{
+		{"history", 5},
+		{"notify_threshold", int64(3)},
+		{"semver_notify_threshold", float64(4)},
+		{"semver", true},
+		{"semver_stable", "true"},
+	}
+	for _, w := range writes {
+		if err := db.SetWatchFlag(ctx, watch.ID, w.name, w.raw); err != nil {
+			t.Fatalf("SetWatchFlag(%s, %#v): %v", w.name, w.raw, err)
+		}
+	}
+
+	raw := rawFlagsJSON(t, db, watch.ID)
+	stored := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		t.Fatalf("stored flags_json %q: %v", raw, err)
+	}
+	if _, ok := stored["history"].(float64); !ok {
+		t.Errorf("history stored as %T, want a JSON number", stored["history"])
+	}
+	if _, ok := stored["semver"].(bool); !ok {
+		t.Errorf("semver stored as %T, want a JSON boolean", stored["semver"])
+	}
+	if _, ok := stored["semver_stable"].(string); !ok {
+		t.Errorf("semver_stable (written as the string \"true\") stored as %T, want a JSON string", stored["semver_stable"])
+	}
+
+	got, err := db.GetWatch(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	settings, err := flags.Resolve(got.Flags, nil)
+	if err != nil {
+		t.Fatalf("Resolve over the stored overrides: %v", err)
+	}
+	want := flags.Settings{
+		History:               5,
+		NotifyThreshold:       3,
+		Semver:                true,
+		SemverStable:          true,
+		SemverNotifyThreshold: 4,
+	}
+	if settings != want {
+		t.Errorf("resolved %+v, want %+v (the store round trip changed a value)", settings, want)
+	}
+}
+
+// claim: with identical created_at values the "newest" ordering falls back to
+// id DESC, and ids are random, so "newest N" is arithmetically determined but
+// arbitrary relative to insertion order. Records the boundary rather than
+// asserting a policy the query does not implement.
+func TestOrderingTieBreakForIdenticalTimestamps(t *testing.T) {
+	db := testutil.Store(t)
+	ctx := context.Background()
+	watch := testutil.Watch(t, db, testutil.DockerHub, "library/nginx", "1.27", nil)
+
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	// Inserted oldest-first: e_z is written BEFORE e_a, yet id DESC keeps e_z —
+	// with identical timestamps the winner is decided by the id string, not by
+	// which event was recorded first. Generated ids are random, so the survivor
+	// of a same-nanosecond tie is arbitrary.
+	for _, id := range []string{"e_z", "e_a"} {
+		if _, err := db.SQL().ExecContext(ctx, `
+			INSERT INTO events (id, watch_id, type, tag, old_digest, new_digest, detail_json, created_at)
+			VALUES (?, ?, 'digest_changed', '1.27', '', ?, '', ?)`,
+			id, watch.ID, id, now); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+
+	got, err := db.RecentEvents(ctx, watch.ID, apitypes.ChangeEventTypes(), 1)
+	if err != nil {
+		t.Fatalf("RecentEvents: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "e_z" {
+		t.Errorf("RecentEvents(1) = %v, want the id-descending winner e_z", idsOf(got))
+	}
+	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1); err != nil {
+		t.Fatalf("PruneWatchEvents: %v", err)
+	}
+	kept, total, err := db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if total != 1 || kept[0].ID != "e_z" {
+		t.Errorf("prune kept %v, want e_z (id DESC within the same timestamp)", idsOf(kept))
+	}
+	t.Log("observed: identical timestamps tie-break on the random id, not on insertion order")
+}
+
+func idsOf(events []*store.EventRecord) []string {
+	out := make([]string, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
+// claim: corrupt stored flags_json is handled consistently across the read and
+// write paths, and a write that cannot be encoded is rejected before anything
+// is stored (no partial update).
+func TestCorruptFlagsJSONAndUnencodableValues(t *testing.T) {
+	db := testutil.Store(t)
+	ctx := context.Background()
+	watch := testutil.Watch(t, db, testutil.DockerHub, "library/nginx", "1.27", nil)
+	if err := db.SetWatchFlag(ctx, watch.ID, "history", 5); err != nil {
+		t.Fatalf("SetWatchFlag: %v", err)
+	}
+	before := rawFlagsJSON(t, db, watch.ID)
+
+	// A value json cannot encode must be refused, and the stored overrides
+	// must be exactly what they were.
+	var panicked any
+	func() {
+		defer func() { panicked = recover() }()
+		if err := db.SetWatchFlag(ctx, watch.ID, "notify_threshold", math.NaN()); err == nil {
+			t.Error("SetWatchFlag stored an unencodable value (NaN)")
+		}
+	}()
+	if panicked != nil {
+		t.Fatalf("SetWatchFlag panicked on an unencodable value: %v", panicked)
+	}
+	if after := rawFlagsJSON(t, db, watch.ID); after != before {
+		t.Errorf("flags_json changed from %q to %q across a failed write", before, after)
+	}
+
+	// A JSON value of the wrong kind is corrupt state. Records the policy:
+	// non-object values fail loudly on both paths, the null literal degrades.
+	for _, bad := range []string{"[1,2]", `"history"`, "5", "{not json"} {
+		if _, err := db.SQL().ExecContext(ctx,
+			`UPDATE watches SET flags_json = ? WHERE id = ?`, bad, watch.ID); err != nil {
+			t.Fatalf("seed %q: %v", bad, err)
+		}
+		if err := db.SetWatchFlag(ctx, watch.ID, "history", 5); err == nil {
+			t.Errorf("flags_json=%s: SetWatchFlag accepted it", bad)
+		}
+		if err := db.UnsetWatchFlag(ctx, watch.ID, "history"); err == nil {
+			t.Errorf("flags_json=%s: UnsetWatchFlag accepted it", bad)
+		}
+		if _, err := db.GetWatch(ctx, watch.ID); err == nil {
+			t.Errorf("flags_json=%s: GetWatch returned it as valid state", bad)
+		}
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE watches SET flags_json = 'null' WHERE id = ?`, watch.ID); err != nil {
+		t.Fatalf("seed null: %v", err)
+	}
+	got, err := db.GetWatch(ctx, watch.ID)
+	if err != nil {
+		t.Errorf("flags_json=null: GetWatch failed with %v; the literal null decodes to \"no overrides\"", err)
+	} else if len(got.Flags) != 0 {
+		t.Errorf("flags_json=null: Flags = %v, want empty", got.Flags)
+	}
+	t.Log("observed: the null literal degrades to \"no overrides\" while other corrupt values fail loudly")
 }
 
 // claim: a channel notification attached to a pruned event disappears with it,

@@ -241,6 +241,86 @@ func TestResolveUnknownNameScopeIsReported(t *testing.T) {
 	}
 }
 
+// claim: Lookup is an exact, case-sensitive name match — a near-miss or an
+// empty name returns the zero Definition and false, and callers must not be
+// able to act on the zero value.
+func TestLookupIsExactAndCaseSensitive(t *testing.T) {
+	for _, name := range []string{"", "History", "HISTORY", "history ", " history", "notify-threshold", "semver_stable "} {
+		def, ok := Lookup(name)
+		if ok {
+			t.Errorf("Lookup(%q) = (%+v, true), want not found", name, def)
+		}
+		if def.Name != "" || def.Type != "" || def.Default != nil || def.PatternOnly || def.Min != nil {
+			t.Errorf("Lookup(%q) returned a non-zero Definition %+v for a miss", name, def)
+		}
+	}
+	for _, def := range Definitions() {
+		got, ok := Lookup(def.Name)
+		if !ok || got.Name != def.Name {
+			t.Errorf("Lookup(%q) = (%+v, %v), want the definition", def.Name, got, ok)
+		}
+	}
+}
+
+// claim: Definitions() hands out independent state on every call — mutating a
+// returned slice, a returned Min pointer or a returned struct must not leak
+// into the next call (the definitions are a shared, process-wide helper).
+func TestDefinitionsReturnsIndependentState(t *testing.T) {
+	first := Definitions()
+	if len(first) == 0 {
+		t.Fatal("no definitions")
+	}
+	first[0].Name = "mutated"
+	first[0].Default = 999
+	if first[0].Min != nil {
+		*first[0].Min = 42
+	}
+	first[0] = Definition{Name: "replaced"}
+
+	second := Definitions()
+	if second[0].Name != "history" {
+		t.Errorf("Definitions()[0].Name = %q after a caller mutated the previous slice", second[0].Name)
+	}
+	if second[0].Default != 1 {
+		t.Errorf("Definitions()[0].Default = %v after a caller mutated the previous slice", second[0].Default)
+	}
+	if second[0].Min == nil || *second[0].Min != -1 {
+		t.Errorf("Definitions()[0].Min = %v after a caller mutated the previous slice's pointer", second[0].Min)
+	}
+}
+
+// claim: FormatValue is a pure formatter — it accepts exactly the typed value
+// for each flag type, rejects everything else, and never mutates its input.
+func TestFormatValueRejectsTypeMismatches(t *testing.T) {
+	history, _ := Lookup("history")
+	semver, _ := Lookup("semver")
+	bad := []struct {
+		def Definition
+		v   any
+	}{
+		{history, "5"},
+		{history, 5.0},
+		{history, int64(5)},
+		{history, true},
+		{history, nil},
+		{history, []int{5}},
+		{semver, 1},
+		{semver, "true"},
+		{semver, nil},
+	}
+	for _, tc := range bad {
+		if got, err := FormatValue(tc.def, tc.v); err == nil {
+			t.Errorf("FormatValue(%s, %#v) = %q, want an error", tc.def.Name, tc.v, got)
+		}
+	}
+	if got, err := FormatValue(history, -1); err != nil || got != "-1" {
+		t.Errorf("FormatValue(history, -1) = (%q, %v), want (\"-1\", nil)", got, err)
+	}
+	if got, err := FormatValue(semver, false); err != nil || got != "false" {
+		t.Errorf("FormatValue(semver, false) = (%q, %v), want (\"false\", nil)", got, err)
+	}
+}
+
 // claim: ValidForKind must be false for a pattern-only flag on every non-
 // pattern kind, and true for the general flags on both kinds.
 func TestValidForKindCoversEveryKind(t *testing.T) {
