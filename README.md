@@ -414,3 +414,13 @@ migrations/*.sql    embedded via go:embed
   unique per (registry, repository, kind, ref).
 - Semver mode ignores every tag that does not parse as semver, including tags
   the glob matched.
+- Retention keeps pending updates using the per-watch counters, not the events
+  themselves. Interleaving the two counters can therefore discard the oldest
+  undelivered update while its counter still reads pending: with
+  `notify_threshold 5` and `history 1`, three undelivered new-tag updates plus
+  one semver bump retain three change events (`max(1, 3, 1)`), dropping the
+  oldest. The batch that eventually fires then summarises what survived.
+- Recording an update and delivering its batch are separate statements, not one
+  transaction. A process death between them can lose one update from its batch
+  (the event is stored but uncounted) or re-send a batch whose notification
+  already went out. `dit notifications` reflects what was actually delivered.
