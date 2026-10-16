@@ -42,25 +42,28 @@ func effectiveValue(def flags.Definition, settings flags.Settings) any {
 
 // buildFlagList assembles the flag listing: definitions with the global
 // values, and — for a watch — the local override and the effective value.
-func (s *Server) buildFlagList(ctx context.Context, watchID string) (apitypes.FlagList, error) {
+// The caller passes the watch it already loaded (nil for the global scope);
+// the listing never re-fetches it.
+func (s *Server) buildFlagList(ctx context.Context, watch *store.WatchRecord) (apitypes.FlagList, error) {
 	globalAny, err := s.globalFlagValues(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var (
-		watch    *store.WatchRecord
-		localAny map[string]any
-	)
-	if watchID != "" {
-		if watch, err = s.store.GetWatch(ctx, watchID); err != nil {
-			return nil, err
-		}
+	var localAny map[string]any
+	if watch != nil {
 		localAny = watch.Flags
 	}
 	effective, err := flags.Resolve(localAny, globalAny)
 	if err != nil {
-		return nil, err
+		// Corrupt stored state degrades to the defaults, matching toAPIWatch,
+		// rather than failing the whole listing.
+		watchID := ""
+		if watch != nil {
+			watchID = watch.ID
+		}
+		s.log.Warn("resolve flags", "watch", watchID, "error", err)
+		effective = flags.DefaultSettings()
 	}
 
 	out := apitypes.FlagList{}
@@ -93,12 +96,14 @@ func (s *Server) buildFlagList(ctx context.Context, watchID string) (apitypes.Fl
 	return out, nil
 }
 
-// storeFlagError maps a store error from a flag write onto an API error.
-func storeFlagError(err error, what string) *apitypes.APIError {
+// storeFlagError maps a store error from a flag write onto an API error,
+// mirroring writeStoreError's messages and logging.
+func (s *Server) storeFlagError(err error, what string) *apitypes.APIError {
 	if store.IsNotFound(err) {
-		apiErr := apitypes.Errorf(apitypes.CodeNotFound, "no such %s", what)
+		apiErr := apitypes.Errorf(apitypes.CodeNotFound, "%s not found", what)
 		return &apiErr
 	}
+	s.log.Error("flag write failed", "what", what, "error", err)
 	apiErr := apitypes.NewError(apitypes.CodeInternalError, "internal server error")
 	return &apiErr
 }
@@ -108,15 +113,15 @@ func (s *Server) handleListFlags(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.context(r)
 	defer cancel()
 
-	watchID := ""
+	var watch *store.WatchRecord
 	if raw := r.URL.Query().Get("watch"); raw != "" {
-		watchID = raw
-		if _, err := s.store.GetWatch(ctx, watchID); err != nil {
+		var err error
+		if watch, err = s.store.GetWatch(ctx, raw); err != nil {
 			writeStoreError(w, r, err, "watch", s.log)
 			return
 		}
 	}
-	list, err := s.buildFlagList(ctx, watchID)
+	list, err := s.buildFlagList(ctx, watch)
 	if err != nil {
 		writeStoreError(w, r, err, "flags", s.log)
 		return
@@ -129,7 +134,12 @@ func (s *Server) handleListWatchFlags(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.context(r)
 	defer cancel()
 
-	list, err := s.buildFlagList(ctx, pathValue(r, "id"))
+	watch, err := s.store.GetWatch(ctx, pathValue(r, "id"))
+	if err != nil {
+		writeStoreError(w, r, err, "watch", s.log)
+		return
+	}
+	list, err := s.buildFlagList(ctx, watch)
 	if err != nil {
 		writeStoreError(w, r, err, "flags", s.log)
 		return
@@ -156,10 +166,11 @@ func (s *Server) setFlag(ctx context.Context, watchID, name string, raw any) (*a
 		return nil, &apiErr
 	}
 
+	var watch *store.WatchRecord
 	if watchID != "" {
-		watch, sErr := s.store.GetWatch(ctx, watchID)
-		if sErr != nil {
-			return nil, storeFlagError(sErr, "watch")
+		var sErr error
+		if watch, sErr = s.store.GetWatch(ctx, watchID); sErr != nil {
+			return nil, s.storeFlagError(sErr, "watch")
 		}
 		if !flags.ValidForKind(def, watch.Kind) {
 			apiErr := apitypes.Errorf(apitypes.CodeValidationFailed,
@@ -168,7 +179,7 @@ func (s *Server) setFlag(ctx context.Context, watchID, name string, raw any) (*a
 			return nil, &apiErr
 		}
 		if sErr := s.store.SetWatchFlag(ctx, watchID, name, value); sErr != nil {
-			return nil, storeFlagError(sErr, "watch")
+			return nil, s.storeFlagError(sErr, "watch")
 		}
 	} else {
 		encoded, encErr := flags.FormatValue(def, value)
@@ -177,11 +188,11 @@ func (s *Server) setFlag(ctx context.Context, watchID, name string, raw any) (*a
 			return nil, &apiErr
 		}
 		if sErr := s.store.SetSetting(ctx, name, encoded); sErr != nil {
-			return nil, storeFlagError(sErr, "setting")
+			return nil, s.storeFlagError(sErr, "setting")
 		}
 	}
 
-	list, lErr := s.buildFlagList(ctx, watchID)
+	list, lErr := s.buildFlagList(ctx, watch)
 	if lErr != nil {
 		apiErr := apitypes.NewError(apitypes.CodeInternalError, "internal server error")
 		return nil, &apiErr
