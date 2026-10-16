@@ -479,14 +479,20 @@ func (e *Engine) checkPattern(ctx context.Context, watch *store.WatchRecord, tri
 		}
 	}
 
-	// Record baselines and refresh digests of known tags.
+	// Record baselines and refresh digests of known tags. A tag resolves its
+	// digest when it is first discovered; carry that digest forward on later
+	// checks instead of blanking it, so the baseline row is not emptied.
 	all := make([]apitypes.TagDigest, 0, len(outcome.Matched))
 	byTag := map[string]string{}
 	for _, t := range resolved {
 		byTag[t.Tag] = t.Digest
 	}
 	for _, tag := range outcome.Matched {
-		all = append(all, apitypes.TagDigest{Tag: tag, Digest: byTag[tag]})
+		digest := byTag[tag]
+		if digest == "" {
+			digest = known[tag]
+		}
+		all = append(all, apitypes.TagDigest{Tag: tag, Digest: digest})
 	}
 	if err := e.store.UpsertWatchTags(ctx, watch.ID, all); err != nil {
 		return nil, err

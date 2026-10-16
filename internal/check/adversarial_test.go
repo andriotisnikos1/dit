@@ -1102,3 +1102,45 @@ func TestAdversarialBatchFetchExcludesFiringEvent(t *testing.T) {
 		t.Errorf("batchCount = %d, want 3", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Probe group E — checkPattern baseline maintenance.
+// ---------------------------------------------------------------------------
+
+// E1: the comment claims known tags' digests are refreshed; a check with no new
+// tags must not silently clear a stored digest.
+func TestAdversarialPatternBaselineDigestRefresh(t *testing.T) {
+	engine, db, fake, _, _ := newEngine(t)
+	ctx := context.Background()
+
+	watch := testutil.PatternWatch(t, db, testRegistry, testRepository, "v1.*")
+	fake.SetTags(testRegistry, testRepository, "v1.0.0")
+	if _, err := engine.CheckWatch(ctx, watch.ID, TriggerSchedule); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	// A new tag is discovered and its digest resolved.
+	fake.SetTags(testRegistry, testRepository, "v1.0.0", "v1.1.0")
+	fake.SetDigest(testRegistry, testRepository, "v1.1.0", testutil.Digest(9))
+	if _, err := engine.CheckWatch(ctx, watch.ID, TriggerSchedule); err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	known, err := db.KnownTags(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("KnownTags: %v", err)
+	}
+	if known["v1.1.0"] != testutil.Digest(9) {
+		t.Fatalf("after discovery digest = %q, want %q", known["v1.1.0"], testutil.Digest(9))
+	}
+	// No new tags this check: the stored digest must not be wiped.
+	if _, err := engine.CheckWatch(ctx, watch.ID, TriggerSchedule); err != nil {
+		t.Fatalf("steady check: %v", err)
+	}
+	known, err = db.KnownTags(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("KnownTags: %v", err)
+	}
+	if known["v1.1.0"] != testutil.Digest(9) {
+		t.Errorf("known tag digest = %q after a steady check, want %q (stored digest cleared)",
+			known["v1.1.0"], testutil.Digest(9))
+	}
+}
