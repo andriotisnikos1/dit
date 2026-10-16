@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -96,9 +97,23 @@ func (a *App) newFlagSetCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <name> <value>",
 		Short: "Set a behaviour flag globally or on a watch",
-		Args:  cobra.ExactArgs(2),
+		Args:  cobra.ArbitraryArgs, // validated below, after the trailing options are split off
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, raw := args[0], args[1]
+			positionals, reparse, err := splitFlagTail(cmd, args)
+			if err != nil {
+				return err
+			}
+			if len(positionals) != 2 {
+				return fmt.Errorf("accepts 2 arg(s), received %d", len(positionals))
+			}
+			if reparse {
+				// Options after the positionals were parsed after the
+				// persistent pre-run hook, so re-resolve them.
+				if err := a.prepare(cmd); err != nil {
+					return err
+				}
+			}
+			name, raw := positionals[0], positionals[1]
 			def, ok := flags.Lookup(name)
 			if !ok {
 				return fmt.Errorf("unknown flag %q; run `dit flag list`", name)
@@ -126,7 +141,53 @@ func (a *App) newFlagSetCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&watch, "watch", "", "set the flag on this watch ID instead of globally")
+	// `flag set history -1` is the documented way to keep every event, but pflag
+	// reads a leading dash as an option and fails with
+	// "unknown shorthand flag: '1' in -1". Stopping option parsing at the first
+	// positional keeps the value intact; options written after the positionals
+	// are re-parsed by splitFlagTail, and a literal -- is honoured as the
+	// explicit end of options, so `flag set history -- -1` keeps working too.
+	cmd.Flags().SetInterspersed(false)
 	return cmd
+}
+
+// splitFlagTail separates the positional arguments of `flag set` from any
+// options that follow them.
+//
+// Option parsing stops at the first positional (so a negative value survives),
+// which leaves trailing options in args; they are parsed here instead. Tokens
+// that parse as a number are values, not options. reparse reports whether
+// options were parsed after the initial pass, so the caller can re-resolve the
+// configuration they set.
+func splitFlagTail(cmd *cobra.Command, args []string) (positionals []string, reparse bool, err error) {
+	positionals = make([]string, 0, len(args))
+	for i, arg := range args {
+		switch {
+		case arg == "--":
+			// An explicit separator: everything after it is a value.
+			return append(positionals, args[i+1:]...), false, nil
+		case looksLikeOption(arg):
+			if err := cmd.Flags().Parse(args[i:]); err != nil {
+				return nil, false, err
+			}
+			return positionals, true, nil
+		default:
+			positionals = append(positionals, arg)
+		}
+	}
+	return positionals, false, nil
+}
+
+// looksLikeOption reports whether a token is an option rather than a value. A
+// number with a leading dash ("-1") is a value.
+func looksLikeOption(tok string) bool {
+	if len(tok) < 2 || tok[0] != '-' {
+		return false
+	}
+	if _, err := strconv.ParseFloat(tok, 64); err == nil {
+		return false
+	}
+	return true
 }
 
 func (a *App) newFlagUnsetCommand() *cobra.Command {
