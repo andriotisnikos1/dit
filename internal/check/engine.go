@@ -53,6 +53,10 @@ type Options struct {
 	Now func() time.Time
 	// Rand is the jitter source, overridable in tests.
 	Rand *rand.Rand
+
+	// Schedule says when the daily and weekly reports run. Both kinds
+	// disabled (the zero value) turns the report scheduler off.
+	Schedule ReportSchedule
 }
 
 // Engine runs the check loop.
@@ -70,6 +74,8 @@ type Engine struct {
 
 	now  func() time.Time
 	rand *rand.Rand
+	// schedule says when the daily and weekly reports run.
+	schedule ReportSchedule
 	// randMu guards rand: a single *rand.Rand is not safe for concurrent use,
 	// and the worker pool computes next attempts from several goroutines at
 	// once.
@@ -78,6 +84,10 @@ type Engine struct {
 	// Per-watch serialization.
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex
+
+	// reportMu serializes report runs, so the scheduler and a manual send
+	// can never mark the same events twice.
+	reportMu sync.Mutex
 
 	ticks    atomic.Uint64
 	lastTick atomic.Pointer[time.Time]
@@ -132,6 +142,7 @@ func New(opts Options) (*Engine, error) {
 		notifyBackoff:  opts.NotifyBackoff,
 		now:            opts.Now,
 		rand:           opts.Rand,
+		schedule:       opts.Schedule,
 		locks:          map[string]*sync.Mutex{},
 	}, nil
 }
@@ -162,7 +173,13 @@ func (e *Engine) settingsFor(ctx context.Context, watch *store.WatchRecord) (fla
 	for k, v := range global {
 		asAny[k] = v
 	}
-	settings, err := flags.Resolve(watch.Flags, asAny)
+	return e.settingsForGlobals(watch, asAny)
+}
+
+// settingsForGlobals resolves a watch's flags against already-loaded global
+// values, so a full-watch scan (reports) loads the settings table once.
+func (e *Engine) settingsForGlobals(watch *store.WatchRecord, global map[string]any) (flags.Settings, error) {
+	settings, err := flags.Resolve(watch.Flags, global)
 	if err != nil {
 		// Stored values were validated when written; unresolvable state falls
 		// back to defaults rather than failing every check.
@@ -179,7 +196,8 @@ func (e *Engine) settingsFor(ctx context.Context, watch *store.WatchRecord) (fla
 // read BEFORE the event is created and folded into its detail under a
 // "batch" key — so the notification and any later retry render the same
 // message. It returns the created event and how many channels it was
-// delivered to (0 while below the threshold).
+// delivered to (0 while below the threshold, and 0 when individual
+// notifications are disabled).
 func (e *Engine) recordChange(ctx context.Context, watch *store.WatchRecord, settings flags.Settings, counter string, threshold int, batchTypes []apitypes.EventType, in store.CreateEventInput) (*store.EventRecord, int, error) {
 	pending := watch.PendingNotifyCount + 1
 	if counter == store.PendingSemverCount {
@@ -189,7 +207,10 @@ func (e *Engine) recordChange(ctx context.Context, watch *store.WatchRecord, set
 	// A threshold lowered to 1 with accumulated pending events must still
 	// flush them as one batch; a normal threshold-1 flow has pending == 1 so
 	// it never fetches and stays byte-identical to legacy behavior.
-	if pending >= threshold && pending > 1 {
+	//
+	// Muted changes skip the batch detail entirely: nothing is delivered, so
+	// building a summary to hide would only bloat the stored event.
+	if settings.NotifyIndividual && pending >= threshold && pending > 1 {
 		prior, err := e.store.RecentEvents(ctx, watch.ID, batchTypes, pending-1)
 		if err != nil {
 			return nil, 0, err
@@ -203,6 +224,20 @@ func (e *Engine) recordChange(ctx context.Context, watch *store.WatchRecord, set
 	event, err := e.store.CreateEvent(ctx, in)
 	if err != nil {
 		return nil, 0, err
+	}
+
+	// Muted: the event is recorded (and feeds any enabled report) but no
+	// notification is delivered. Pending counters are flushed rather than
+	// incremented — otherwise unmuting later would fire a stale batch of
+	// changes the operator never wanted to see individually.
+	if !settings.NotifyIndividual {
+		if err := e.flushPending(ctx, watch, counter); err != nil {
+			return nil, 0, err
+		}
+		if err := e.pruneHistory(ctx, watch.ID, watch.PendingNotifyCount, watch.PendingSemverCount, settings); err != nil {
+			return nil, 0, err
+		}
+		return event, 0, nil
 	}
 
 	count, err := e.store.IncrementPendingCount(ctx, watch.ID, counter, 1)
@@ -233,6 +268,31 @@ func (e *Engine) recordChange(ctx context.Context, watch *store.WatchRecord, set
 	return event, notified, nil
 }
 
+// flushPending zeroes the pending counter named by counter when it holds a
+// value, updating the in-memory watch snapshot too so the following prune sees
+// the true state.
+func (e *Engine) flushPending(ctx context.Context, watch *store.WatchRecord, counter string) error {
+	switch counter {
+	case store.PendingSemverCount:
+		if watch.PendingSemverCount == 0 {
+			return nil
+		}
+		if err := e.store.ResetPendingCount(ctx, watch.ID, store.PendingSemverCount); err != nil {
+			return err
+		}
+		watch.PendingSemverCount = 0
+	default:
+		if watch.PendingNotifyCount == 0 {
+			return nil
+		}
+		if err := e.store.ResetPendingCount(ctx, watch.ID, store.PendingNotifyCount); err != nil {
+			return err
+		}
+		watch.PendingNotifyCount = 0
+	}
+	return nil
+}
+
 // pruneHistory applies the history flag: keep the newest max(history,
 // pending) update events and failure events. history of -1 keeps everything.
 func (e *Engine) pruneHistory(ctx context.Context, watchID string, pendingNotify, pendingSemver int, settings flags.Settings) error {
@@ -246,7 +306,10 @@ func (e *Engine) pruneHistory(ctx context.Context, watchID string, pendingNotify
 	if pendingSemver > keep {
 		keep = pendingSemver
 	}
-	pruned, err := e.store.PruneWatchEvents(ctx, watchID, keep)
+	pruned, err := e.store.PruneWatchEvents(ctx, watchID, keep, store.ReportProtection{
+		Daily:  settings.ReportDaily,
+		Weekly: settings.ReportWeekly,
+	})
 	if err != nil {
 		return err
 	}
