@@ -69,6 +69,34 @@ func Definitions() []Definition {
 			Min:     ptr(1),
 		},
 		{
+			Name: "notify_individual",
+			Type: TypeBool,
+			Description: "Deliver update notifications (digest changes, new tags, " +
+				"version bumps) as they happen, subject to notify_threshold. Set to " +
+				"false to silence them while still recording events, e.g. when a " +
+				"daily or weekly report is enabled. Failure and recovery " +
+				"notifications are unaffected.",
+			Default: true,
+		},
+		{
+			Name: "report_daily",
+			Type: TypeBool,
+			Description: "Include this watch's update events in the server's daily " +
+				"report. Each event is reported once; a period with no changes sends " +
+				"nothing. The schedule is configured on the server " +
+				"(DIT_REPORT_DAILY_AT).",
+			Default: false,
+		},
+		{
+			Name: "report_weekly",
+			Type: TypeBool,
+			Description: "Include this watch's update events in the server's weekly " +
+				"report. The weekly report rolls up the whole week, so with both " +
+				"report flags on an event appears in a daily and in a weekly report. " +
+				"Schedule: DIT_REPORT_WEEKLY_AT and DIT_REPORT_WEEKLY_DAY.",
+			Default: false,
+		},
+		{
 			Name: "semver",
 			Type: TypeBool,
 			Description: "Pattern watches: track the highest semver version among " +
@@ -206,6 +234,9 @@ func FormatValue(def Definition, value any) (string, error) {
 type Settings struct {
 	History               int
 	NotifyThreshold       int
+	NotifyIndividual      bool
+	ReportDaily           bool
+	ReportWeekly          bool
 	Semver                bool
 	SemverStable          bool
 	SemverNotifyThreshold int
@@ -217,6 +248,9 @@ func DefaultSettings() Settings {
 	return Settings{
 		History:               1,
 		NotifyThreshold:       1,
+		NotifyIndividual:      true,
+		ReportDaily:           false,
+		ReportWeekly:          false,
 		Semver:                false,
 		SemverStable:          false,
 		SemverNotifyThreshold: 1,
@@ -263,6 +297,12 @@ func Resolve(watchFlags, globalFlags map[string]any) (Settings, error) {
 			out.History = v.(int)
 		case "notify_threshold":
 			out.NotifyThreshold = v.(int)
+		case "notify_individual":
+			out.NotifyIndividual = v.(bool)
+		case "report_daily":
+			out.ReportDaily = v.(bool)
+		case "report_weekly":
+			out.ReportWeekly = v.(bool)
 		case "semver":
 			out.Semver = v.(bool)
 		case "semver_stable":

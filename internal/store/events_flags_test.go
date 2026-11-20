@@ -71,7 +71,7 @@ func TestPruneWatchEventsKeepsNewestPerFamily(t *testing.T) {
 		eventAt(t, db, watch.ID, apitypes.EventCheckFailed, d)
 	}
 
-	pruned, err := db.PruneWatchEvents(ctx, watch.ID, 2)
+	pruned, err := db.PruneWatchEvents(ctx, watch.ID, 2, store.ReportProtection{})
 	if err != nil {
 		t.Fatalf("PruneWatchEvents: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestPruneWatchEventsKeepsNewestPerFamily(t *testing.T) {
 	}
 
 	// keep <= 0 wipes the watch's history entirely.
-	if _, err := db.PruneWatchEvents(ctx, watch.ID, 0); err != nil {
+	if _, err := db.PruneWatchEvents(ctx, watch.ID, 0, store.ReportProtection{}); err != nil {
 		t.Fatalf("PruneWatchEvents: %v", err)
 	}
 	if _, total, err = db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 100}); err != nil || total != 0 {
@@ -131,7 +131,7 @@ func TestPruningEventsCascadesNotificationRows(t *testing.T) {
 	}
 
 	// keep=1 prunes the older event; its notification row must cascade away.
-	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1); err != nil {
+	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1, store.ReportProtection{}); err != nil {
 		t.Fatalf("PruneWatchEvents: %v", err)
 	}
 	notifications, total, err := db.ListNotifications(ctx, store.NotificationFilter{Limit: 100})

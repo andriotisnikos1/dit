@@ -302,7 +302,7 @@ func TestPruneWatchEventsBoundaries(t *testing.T) {
 			for i := 0; i < sc.failure; i++ {
 				eventAt(t, db, watch.ID, apitypes.EventCheckFailed, "f")
 			}
-			if _, err := db.PruneWatchEvents(ctx, watch.ID, sc.keep); err != nil {
+			if _, err := db.PruneWatchEvents(ctx, watch.ID, sc.keep, store.ReportProtection{}); err != nil {
 				t.Fatalf("PruneWatchEvents: %v", err)
 			}
 			_, total, err := db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 100})
@@ -324,7 +324,7 @@ func TestPruneWatchEventsBoundaries(t *testing.T) {
 	}
 	eventAt(t, db, watch.ID, apitypes.EventCheckRecovered, "r")
 	for _, keep := range []int{0, -1, -99} {
-		pruned, err := db.PruneWatchEvents(ctx, watch.ID, keep)
+		pruned, err := db.PruneWatchEvents(ctx, watch.ID, keep, store.ReportProtection{})
 		if err != nil {
 			t.Fatalf("PruneWatchEvents(keep=%d): %v", keep, err)
 		}
@@ -335,10 +335,10 @@ func TestPruneWatchEventsBoundaries(t *testing.T) {
 	if _, total, err := db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 100}); err != nil || total != 0 {
 		t.Errorf("after the wipe: (%d, %v), want 0 events", total, err)
 	}
-	if pruned, err := db.PruneWatchEvents(ctx, watch.ID, 5); err != nil || pruned != 0 {
+	if pruned, err := db.PruneWatchEvents(ctx, watch.ID, 5, store.ReportProtection{}); err != nil || pruned != 0 {
 		t.Errorf("pruning an empty history = (%d, %v), want (0, nil)", pruned, err)
 	}
-	if pruned, err := db.PruneWatchEvents(ctx, "w_missing", 2); err != nil || pruned != 0 {
+	if pruned, err := db.PruneWatchEvents(ctx, "w_missing", 2, store.ReportProtection{}); err != nil || pruned != 0 {
 		t.Errorf("pruning an unknown watch = (%d, %v), want (0, nil)", pruned, err)
 	}
 	// A watch with a very large history but a tiny keep: the newest survive,
@@ -347,13 +347,13 @@ func TestPruneWatchEventsBoundaries(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		eventAt(t, db, big.ID, apitypes.EventNewTags, "batch")
 	}
-	if _, err := db.PruneWatchEvents(ctx, big.ID, 3); err != nil {
+	if _, err := db.PruneWatchEvents(ctx, big.ID, 3, store.ReportProtection{}); err != nil {
 		t.Fatalf("PruneWatchEvents: %v", err)
 	}
 	if _, total, _ := db.ListEvents(ctx, store.EventFilter{WatchID: big.ID, Limit: 100}); total != 3 {
 		t.Errorf("kept %d of 12 with keep=3", total)
 	}
-	if again, err := db.PruneWatchEvents(ctx, big.ID, 3); err != nil || again != 0 {
+	if again, err := db.PruneWatchEvents(ctx, big.ID, 3, store.ReportProtection{}); err != nil || again != 0 {
 		t.Errorf("re-pruning = (%d, %v), want (0, nil) — pruning must be idempotent", again, err)
 	}
 }
@@ -962,6 +962,7 @@ func TestWatchFlagValueJSONRoundTripByType(t *testing.T) {
 	want := flags.Settings{
 		History:               5,
 		NotifyThreshold:       3,
+		NotifyIndividual:      true,
 		Semver:                true,
 		SemverStable:          true,
 		SemverNotifyThreshold: 4,
@@ -1001,7 +1002,7 @@ func TestOrderingTieBreakForIdenticalTimestamps(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "e_z" {
 		t.Errorf("RecentEvents(1) = %v, want the id-descending winner e_z", idsOf(got))
 	}
-	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1); err != nil {
+	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1, store.ReportProtection{}); err != nil {
 		t.Fatalf("PruneWatchEvents: %v", err)
 	}
 	kept, total, err := db.ListEvents(ctx, store.EventFilter{WatchID: watch.ID, Limit: 10})
@@ -1106,7 +1107,7 @@ func TestPruneCascadeIsPerEvent(t *testing.T) {
 			t.Fatalf("CreateNotification: %v", err)
 		}
 	}
-	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1); err != nil {
+	if _, err := db.PruneWatchEvents(ctx, watch.ID, 1, store.ReportProtection{}); err != nil {
 		t.Fatalf("PruneWatchEvents: %v", err)
 	}
 

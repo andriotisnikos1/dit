@@ -34,8 +34,11 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if _, ok := applied["0004_flags"]; !ok {
 		t.Errorf("0004_flags not recorded as applied; got %v", applied)
 	}
-	if len(applied) != 4 {
-		t.Errorf("applied migrations = %d, want 4", len(applied))
+	if _, ok := applied["0005_reports"]; !ok {
+		t.Errorf("0005_reports not recorded as applied; got %v", applied)
+	}
+	if len(applied) != 5 {
+		t.Errorf("applied migrations = %d, want 5", len(applied))
 	}
 
 	// The schema must be usable after the re-run.

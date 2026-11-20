@@ -394,16 +394,28 @@ func placeholders(n int) string {
 	return out
 }
 
+// ReportProtection names the report kinds whose unreported events must
+// survive history pruning, so a pending digest is never eaten by a small
+// history flag.
+type ReportProtection struct {
+	Daily  bool
+	Weekly bool
+}
+
 // PruneWatchEvents caps the per-watch event history: the newest `keep`
 // update-family events and the newest `keep` failure-family events survive;
 // everything older is deleted, and notification rows cascade with their
 // events. keep <= 0 deletes the watch's entire event history.
-func (db *DB) PruneWatchEvents(ctx context.Context, watchID string, keep int) (int, error) {
+//
+// Events not yet delivered by an enabled report kind are protected, up to
+// ReportBacklogLimit per family, so the next daily/weekly report still sees
+// them.
+func (db *DB) PruneWatchEvents(ctx context.Context, watchID string, keep int, protect ReportProtection) (int, error) {
 	families := [][]apitypes.EventType{apitypes.ChangeEventTypes(), apitypes.FailureEventTypes()}
 	total := 0
 	err := db.withTx(ctx, func(tx *sql.Tx) error {
 		for _, family := range families {
-			n, err := pruneEventFamily(ctx, tx, watchID, family, keep)
+			n, err := pruneEventFamily(ctx, tx, watchID, family, keep, protect)
 			if err != nil {
 				return err
 			}
@@ -417,37 +429,60 @@ func (db *DB) PruneWatchEvents(ctx context.Context, watchID string, keep int) (i
 	return total, nil
 }
 
-// pruneEventFamily deletes all but the newest keep events of a family.
-func pruneEventFamily(ctx context.Context, tx *sql.Tx, watchID string, types []apitypes.EventType, keep int) (int, error) {
+// pruneEventFamily deletes all but the newest keep events of a family, leaving
+// unreported events of a protected report kind in place.
+func pruneEventFamily(ctx context.Context, tx *sql.Tx, watchID string, types []apitypes.EventType, keep int, protect ReportProtection) (int, error) {
 	in := placeholders(len(types))
+	query := `DELETE FROM events WHERE watch_id = ? AND type IN (` + in + `)`
 	args := []any{watchID}
-	for _, t := range types {
-		args = append(args, string(t))
+	args = append(args, eventTypeStrings(types)...)
+
+	if keep > 0 {
+		query += ` AND id NOT IN (
+			SELECT id FROM events WHERE watch_id = ? AND type IN (` + in + `)
+			ORDER BY created_at DESC, id DESC LIMIT ?
+		)`
+		args = append(args, watchID)
+		args = append(args, eventTypeStrings(types)...)
+		args = append(args, keep)
+	}
+	// A protected report kind keeps its unreported events, newest first, up
+	// to the backlog cap: the cap is what stops a never-deliverable report
+	// from growing the table without bound.
+	protected := []struct {
+		enabled bool
+		column  string
+	}{
+		{protect.Daily, "daily_reported_at"},
+		{protect.Weekly, "weekly_reported_at"},
+	}
+	for _, p := range protected {
+		if !p.enabled {
+			continue
+		}
+		query += ` AND id NOT IN (
+			SELECT id FROM events WHERE watch_id = ? AND type IN (` + in + `)
+			  AND ` + p.column + ` IS NULL
+			ORDER BY created_at DESC, id DESC LIMIT ?
+		)`
+		args = append(args, watchID)
+		args = append(args, eventTypeStrings(types)...)
+		args = append(args, ReportBacklogLimit)
 	}
 
-	var (
-		res sql.Result
-		err error
-	)
-	if keep <= 0 {
-		res, err = tx.ExecContext(ctx,
-			`DELETE FROM events WHERE watch_id = ? AND type IN (`+in+`)`, args...)
-	} else {
-		args = append(args, watchID)
-		for _, t := range types {
-			args = append(args, string(t))
-		}
-		args = append(args, keep)
-		res, err = tx.ExecContext(ctx, `
-			DELETE FROM events
-			WHERE watch_id = ? AND type IN (`+in+`) AND id NOT IN (
-				SELECT id FROM events WHERE watch_id = ? AND type IN (`+in+`)
-				ORDER BY created_at DESC, id DESC LIMIT ?
-			)`, args...)
-	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("store: prune events: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+// eventTypeStrings converts an event type slice for SQL arguments.
+func eventTypeStrings(types []apitypes.EventType) []any {
+	out := make([]any, 0, len(types))
+	for _, t := range types {
+		out = append(out, string(t))
+	}
+	return out
 }

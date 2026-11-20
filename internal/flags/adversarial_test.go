@@ -68,6 +68,9 @@ func TestDefinitionsAgreeWithDefaultSettings(t *testing.T) {
 	byName := map[string]any{
 		"history":                 defaults.History,
 		"notify_threshold":        defaults.NotifyThreshold,
+		"notify_individual":       defaults.NotifyIndividual,
+		"report_daily":            defaults.ReportDaily,
+		"report_weekly":           defaults.ReportWeekly,
 		"semver":                  defaults.Semver,
 		"semver_stable":           defaults.SemverStable,
 		"semver_notify_threshold": defaults.SemverNotifyThreshold,
