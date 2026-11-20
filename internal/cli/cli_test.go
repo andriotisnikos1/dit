@@ -42,6 +42,10 @@ type stubAPI struct {
 	setFlagFn   func(context.Context, string, string, any) (apitypes.Flag, error)
 	unsetFlagFn func(context.Context, string, string) error
 
+	reportsFn       func(context.Context) (apitypes.ReportStatus, error)
+	previewReportFn func(context.Context, apitypes.ReportKind) (apitypes.ReportResult, error)
+	sendReportFn    func(context.Context, apitypes.ReportKind) (apitypes.ReportResult, error)
+
 	// Calls records the method names invoked.
 	Calls []string
 }
@@ -142,6 +146,30 @@ func (s *stubAPI) RetryNotification(ctx context.Context, id string) (apitypes.No
 		return apitypes.NotificationRetryResult{OK: true}, nil
 	}
 	return s.retryFn(ctx, id)
+}
+
+func (s *stubAPI) Reports(ctx context.Context) (apitypes.ReportStatus, error) {
+	s.record("reports")
+	if s.reportsFn == nil {
+		return apitypes.ReportStatus{}, nil
+	}
+	return s.reportsFn(ctx)
+}
+
+func (s *stubAPI) PreviewReport(ctx context.Context, kind apitypes.ReportKind) (apitypes.ReportResult, error) {
+	s.record("previewReport")
+	if s.previewReportFn == nil {
+		return apitypes.ReportResult{Kind: kind, DryRun: true}, nil
+	}
+	return s.previewReportFn(ctx, kind)
+}
+
+func (s *stubAPI) SendReport(ctx context.Context, kind apitypes.ReportKind) (apitypes.ReportResult, error) {
+	s.record("sendReport")
+	if s.sendReportFn == nil {
+		return apitypes.ReportResult{Kind: kind}, nil
+	}
+	return s.sendReportFn(ctx, kind)
 }
 
 func (s *stubAPI) ListChannels(ctx context.Context) (apitypes.List[apitypes.Channel], error) {

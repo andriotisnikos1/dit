@@ -538,8 +538,8 @@ func TestAdversarialFlagListShape(t *testing.T) {
 	}
 
 	global := h.flagsOf("")
-	if len(global) != 5 {
-		t.Fatalf("global listing has %d flags, want 5", len(global))
+	if len(global) != 8 {
+		t.Fatalf("global listing has %d flags, want 8", len(global))
 	}
 	for _, f := range global {
 		if f.Local != nil {
@@ -560,8 +560,8 @@ func TestAdversarialFlagListShape(t *testing.T) {
 	}
 
 	scoped := h.flagsOf(patID)
-	if len(scoped) != 5 {
-		t.Fatalf("watch listing has %d flags, want 5", len(scoped))
+	if len(scoped) != 8 {
+		t.Fatalf("watch listing has %d flags, want 8", len(scoped))
 	}
 	want := map[string]struct {
 		global, local, effective any // nil means "must be absent"

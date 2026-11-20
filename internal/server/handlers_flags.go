@@ -30,6 +30,12 @@ func effectiveValue(def flags.Definition, settings flags.Settings) any {
 		return settings.History
 	case "notify_threshold":
 		return settings.NotifyThreshold
+	case "notify_individual":
+		return settings.NotifyIndividual
+	case "report_daily":
+		return settings.ReportDaily
+	case "report_weekly":
+		return settings.ReportWeekly
 	case "semver":
 		return settings.Semver
 	case "semver_stable":

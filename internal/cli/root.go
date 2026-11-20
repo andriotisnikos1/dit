@@ -93,6 +93,7 @@ shared secret, and every watch, channel and event lives on the server.`,
 		app.newCredsCommand(),
 		app.newEventsCommand(),
 		app.newNotificationsCommand(),
+		app.newReportCommand(),
 	)
 	return root
 }

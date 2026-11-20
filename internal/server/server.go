@@ -140,6 +140,10 @@ func (s *Server) routes() http.Handler {
 	api("GET /api/v1/notifications", s.handleListNotifications)
 	api("POST /api/v1/notifications/{id}/retry", s.handleRetryNotification)
 
+	api("GET /api/v1/reports", s.handleReportStatus)
+	api("GET /api/v1/reports/{kind}/preview", s.handlePreviewReport)
+	api("POST /api/v1/reports/{kind}/send", s.handleSendReport)
+
 	// Anything else is a 404 in the standard envelope.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, apitypes.Errorf(apitypes.CodeNotFound, "no such endpoint: %s %s",

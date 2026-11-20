@@ -84,6 +84,10 @@ type API interface {
 	Notifications(ctx context.Context, limit int) (apitypes.List[apitypes.Notification], error)
 	RetryNotification(ctx context.Context, id string) (apitypes.NotificationRetryResult, error)
 
+	Reports(ctx context.Context) (apitypes.ReportStatus, error)
+	PreviewReport(ctx context.Context, kind apitypes.ReportKind) (apitypes.ReportResult, error)
+	SendReport(ctx context.Context, kind apitypes.ReportKind) (apitypes.ReportResult, error)
+
 	ListChannels(ctx context.Context) (apitypes.List[apitypes.Channel], error)
 	CreateChannel(ctx context.Context, req apitypes.CreateChannelRequest) (apitypes.Channel, error)
 	GetChannel(ctx context.Context, id string) (apitypes.Channel, error)
@@ -271,6 +275,27 @@ func (c *Client) Notifications(ctx context.Context, limit int) (apitypes.List[ap
 func (c *Client) RetryNotification(ctx context.Context, id string) (apitypes.NotificationRetryResult, error) {
 	var out apitypes.NotificationRetryResult
 	err := c.do(ctx, http.MethodPost, "/api/v1/notifications/"+url.PathEscape(id)+"/retry", nil, nil, &out, false)
+	return out, err
+}
+
+// Reports fetches the report schedule and last-run state.
+func (c *Client) Reports(ctx context.Context) (apitypes.ReportStatus, error) {
+	var out apitypes.ReportStatus
+	err := c.do(ctx, http.MethodGet, "/api/v1/reports", nil, nil, &out, false)
+	return out, err
+}
+
+// PreviewReport renders the next report of a kind without sending it.
+func (c *Client) PreviewReport(ctx context.Context, kind apitypes.ReportKind) (apitypes.ReportResult, error) {
+	var out apitypes.ReportResult
+	err := c.do(ctx, http.MethodGet, "/api/v1/reports/"+url.PathEscape(string(kind))+"/preview", nil, nil, &out, false)
+	return out, err
+}
+
+// SendReport sends a report of a kind now.
+func (c *Client) SendReport(ctx context.Context, kind apitypes.ReportKind) (apitypes.ReportResult, error) {
+	var out apitypes.ReportResult
+	err := c.do(ctx, http.MethodPost, "/api/v1/reports/"+url.PathEscape(string(kind))+"/send", nil, nil, &out, false)
 	return out, err
 }
 

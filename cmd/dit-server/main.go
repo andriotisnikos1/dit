@@ -17,6 +17,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// Embed the IANA timezone database: the distroless runtime image ships
+	// none, and report schedules may name any zone.
+	_ "time/tzdata"
 
 	"github.com/andriotisnikos1/dit"
 	"github.com/andriotisnikos1/dit/internal/apitypes"
@@ -120,6 +123,12 @@ func run() int {
 		return 0
 	}
 
+	schedule, err := cfg.ReportSchedule()
+	if err != nil {
+		logger.Error("configure reports", "error", err)
+		return 1
+	}
+
 	engine, err := check.New(check.Options{
 		Store:          db,
 		Registry:       registry.NewRemote(),
@@ -130,6 +139,7 @@ func run() int {
 		Timeout:        cfg.CheckTimeout.Std(),
 		NotifyAttempts: cfg.NotifyAttempts,
 		NotifyBackoff:  cfg.NotifyBackoff.Std(),
+		Schedule:       schedule,
 	})
 	if err != nil {
 		logger.Error("build check engine", "error", err)
@@ -160,6 +170,11 @@ func run() int {
 		engineErr <- engine.Run(ctx)
 	}()
 
+	reportErr := make(chan error, 1)
+	go func() {
+		reportErr <- engine.RunReporter(ctx)
+	}()
+
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.Info("dit-server listening", "addr", cfg.Listen, "version", Version)
@@ -180,6 +195,11 @@ func run() int {
 	case err := <-engineErr:
 		if err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("check engine stopped", "error", err)
+			return 1
+		}
+	case err := <-reportErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("report scheduler stopped", "error", err)
 			return 1
 		}
 	case <-ctx.Done():

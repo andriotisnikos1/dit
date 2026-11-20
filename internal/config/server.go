@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/andriotisnikos1/dit/internal/schedule"
 )
 
 // Environment variables read by dit-server.
@@ -35,6 +37,10 @@ const (
 	EnvNotifyBackoff   = "DIT_NOTIFY_BACKOFF"
 	EnvLogLevel        = "DIT_LOG_LEVEL"
 	EnvDefaultChannels = "DIT_DEFAULT_CHANNELS"
+	EnvReportDailyAt   = "DIT_REPORT_DAILY_AT"
+	EnvReportWeeklyAt  = "DIT_REPORT_WEEKLY_AT"
+	EnvReportWeekday   = "DIT_REPORT_WEEKLY_DAY"
+	EnvReportTimezone  = "DIT_REPORT_TIMEZONE"
 )
 
 // Defaults for dit-server.
@@ -72,6 +78,12 @@ type Server struct {
 	// flagged is_default".
 	DefaultChannels []string `yaml:"default_channels"`
 
+	// Report schedule. An empty time disables that report kind.
+	ReportDailyAt   string `yaml:"report_daily_at"`
+	ReportWeeklyAt  string `yaml:"report_weekly_at"`
+	ReportWeeklyDay string `yaml:"report_weekly_day"`
+	ReportTimezone  string `yaml:"report_timezone"`
+
 	// Path is the config file that was loaded, empty when none was.
 	Path string `yaml:"-"`
 }
@@ -87,6 +99,8 @@ func DefaultServer() *Server {
 		NotifyAttempts:   DefaultNotifyAttempts,
 		NotifyBackoff:    Duration(DefaultNotifyBackoff),
 		LogLevel:         DefaultLogLevel,
+		ReportWeeklyDay:  "mon",
+		ReportTimezone:   "UTC",
 	}
 }
 
@@ -144,6 +158,10 @@ func applyServerEnv(cfg *Server) error {
 	setString(EnvMasterKey, &cfg.MasterKey)
 	setString(EnvMasterKeyFile, &cfg.MasterKeyFile)
 	setString(EnvLogLevel, &cfg.LogLevel)
+	setString(EnvReportDailyAt, &cfg.ReportDailyAt)
+	setString(EnvReportWeeklyAt, &cfg.ReportWeeklyAt)
+	setString(EnvReportWeekday, &cfg.ReportWeeklyDay)
+	setString(EnvReportTimezone, &cfg.ReportTimezone)
 
 	var err error
 	if cfg.CheckInterval, err = envDuration(EnvCheckInterval, cfg.CheckInterval); err != nil {
@@ -172,6 +190,16 @@ func (c *Server) normalize() {
 	c.LogLevel = strings.ToLower(strings.TrimSpace(c.LogLevel))
 	if c.LogLevel == "" {
 		c.LogLevel = DefaultLogLevel
+	}
+	c.ReportDailyAt = strings.TrimSpace(c.ReportDailyAt)
+	c.ReportWeeklyAt = strings.TrimSpace(c.ReportWeeklyAt)
+	c.ReportWeeklyDay = strings.ToLower(strings.TrimSpace(c.ReportWeeklyDay))
+	if c.ReportWeeklyDay == "" {
+		c.ReportWeeklyDay = "mon"
+	}
+	c.ReportTimezone = strings.TrimSpace(c.ReportTimezone)
+	if c.ReportTimezone == "" {
+		c.ReportTimezone = "UTC"
 	}
 	if strings.TrimSpace(c.DataDir) == "" {
 		c.DataDir = DefaultDataDir
@@ -215,7 +243,64 @@ func (c *Server) Validate() error {
 			return fmt.Errorf("%s: %w", EnvMasterKey, err)
 		}
 	}
+	if _, err := c.ReportSchedule(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ReportSchedule builds the engine's report schedule from the configured
+// strings. Empty report times disable that kind.
+func (c *Server) ReportSchedule() (schedule.ReportSchedule, error) {
+	loc, err := time.LoadLocation(c.ReportTimezone)
+	if err != nil {
+		return schedule.ReportSchedule{}, fmt.Errorf("%s=%q: unknown timezone: %w",
+			EnvReportTimezone, c.ReportTimezone, err)
+	}
+	out := schedule.ReportSchedule{Location: loc, WeeklyDay: time.Monday}
+
+	if c.ReportDailyAt != "" {
+		clock, err := schedule.ParseClock(c.ReportDailyAt)
+		if err != nil {
+			return schedule.ReportSchedule{}, fmt.Errorf("%s: %w", EnvReportDailyAt, err)
+		}
+		out.Daily = &clock
+	}
+	if c.ReportWeeklyAt != "" {
+		clock, err := schedule.ParseClock(c.ReportWeeklyAt)
+		if err != nil {
+			return schedule.ReportSchedule{}, fmt.Errorf("%s: %w", EnvReportWeeklyAt, err)
+		}
+		day, err := parseWeekday(c.ReportWeeklyDay)
+		if err != nil {
+			return schedule.ReportSchedule{}, fmt.Errorf("%s: %w", EnvReportWeekday, err)
+		}
+		out.Weekly = &clock
+		out.WeeklyDay = day
+	}
+	return out, nil
+}
+
+// parseWeekday accepts mon/monday … sun/sunday, case-insensitively.
+func parseWeekday(raw string) (time.Weekday, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "sun", "sunday":
+		return time.Sunday, nil
+	case "mon", "monday":
+		return time.Monday, nil
+	case "tue", "tues", "tuesday":
+		return time.Tuesday, nil
+	case "wed", "weds", "wednesday":
+		return time.Wednesday, nil
+	case "thu", "thur", "thurs", "thursday":
+		return time.Thursday, nil
+	case "fri", "friday":
+		return time.Friday, nil
+	case "sat", "saturday":
+		return time.Saturday, nil
+	default:
+		return 0, fmt.Errorf("invalid weekday %q: expected mon, tue, wed, thu, fri, sat or sun", raw)
+	}
 }
 
 // Redacted returns a copy of the configuration with secrets masked, suitable
@@ -243,6 +328,10 @@ func (c *Server) Redacted() map[string]any {
 		"notify_attempts":   c.NotifyAttempts,
 		"notify_backoff":    c.NotifyBackoff.String(),
 		"log_level":         c.LogLevel,
+		"report_daily_at":   c.ReportDailyAt,
+		"report_weekly_at":  c.ReportWeeklyAt,
+		"report_weekday":    c.ReportWeeklyDay,
+		"report_timezone":   c.ReportTimezone,
 		"config_file":       c.Path,
 	}
 }

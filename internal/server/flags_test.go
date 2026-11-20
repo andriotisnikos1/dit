@@ -27,8 +27,8 @@ func TestListGlobalFlags(t *testing.T) {
 	}
 	var list apitypes.FlagList
 	h.decode(rec, &list)
-	if len(list) != 5 {
-		t.Fatalf("listed %d flags, want 5", len(list))
+	if len(list) != 8 {
+		t.Fatalf("listed %d flags, want 8", len(list))
 	}
 	history := getFlag(t, list, "history")
 	// JSON numbers decode into any as float64, so compare against float64(1).

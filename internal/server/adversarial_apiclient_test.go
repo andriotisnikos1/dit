@@ -36,8 +36,8 @@ func TestAdversarialAPIClientAgainstRealServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListFlags global: %v", err)
 	}
-	if len(list) != 5 {
-		t.Fatalf("ListFlags returned %d flags, want 5", len(list))
+	if len(list) != 8 {
+		t.Fatalf("ListFlags returned %d flags, want 8", len(list))
 	}
 	if list[0].Name == "" {
 		t.Errorf("flag entry has no name: %+v", list[0])
