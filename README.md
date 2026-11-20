@@ -159,6 +159,9 @@ dit flag list --watch 12           # adds LOCAL and EFFECTIVE columns
 |---|---|---|---|---|
 | `history` | int | `1` | all watches | Update events to retain per watch, newest first; `-1` keeps all, `0` is rejected. |
 | `notify_threshold` | int | `1` | all watches | Updates to accumulate before notifying; `1` notifies on every update. |
+| `notify_individual` | bool | `true` | all watches | Deliver update notifications as they happen. `false` silences them and records events only — the basis of report-only operation. Failure and recovery alerts are unaffected. |
+| `report_daily` | bool | `false` | all watches | Include the watch's update events in the server's daily report. |
+| `report_weekly` | bool | `false` | all watches | Include the watch's update events in the weekly report. |
 | `semver` | bool | `false` | pattern watches | Track the highest semver version among matched tags and report version bumps, not every new tag. |
 | `semver_stable` | bool | `false` | pattern watches | In semver mode, ignore prereleases (a `-rc.1` tag never counts). |
 | `semver_notify_threshold` | int | `1` | pattern watches | Semver bumps to accumulate before notifying; independent of `notify_threshold`. |
@@ -183,6 +186,53 @@ Flags          history=5 (local), notify_threshold=3 (global)
   they fire exactly as they always did.
 - Semver mode seeds silently on activation — enabling it never fires on versions
   that already exist — and a new tag that is not a higher version is not a bump.
+- `notify_individual=false` flushes any pending `notify_threshold` batch instead
+  of firing it later: unmuting starts clean rather than replaying changes the
+  operator chose not to see individually.
+
+### Daily and weekly reports
+
+Reports turn many per-update messages into one summary. Silence the individual
+notifications, then turn on the report you want:
+
+```bash
+dit flag set notify_individual false   # globally, or --watch <id>
+dit flag set report_daily true         # daily summary
+dit flag set report_weekly true        # weekly roll-up (may be combined)
+```
+
+The schedule lives on the server, not in the flags:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DIT_REPORT_DAILY_AT` | unset (off) | Local time for the daily report, `HH:MM`. |
+| `DIT_REPORT_WEEKLY_AT` | unset (off) | Local time for the weekly report, `HH:MM`. |
+| `DIT_REPORT_WEEKLY_DAY` | `mon` | Weekday of the weekly report (`mon` … `sun`). |
+| `DIT_REPORT_TIMEZONE` | `UTC` | IANA zone the times are expressed in, e.g. `Europe/Athens`. |
+
+Delivery rules:
+
+- One message per notification channel, aggregating every report-enabled watch
+  that notifies that channel — not one message per watch.
+- Each event is reported once per kind. With both report flags on, an event
+  appears in the daily report and again in the weekly roll-up; that is intended.
+- A period with no changes sends nothing. Failure and recovery alerts still
+  arrive immediately, and a watch that is failing when the report runs is
+  flagged in it.
+- Events are marked as reported only when at least one channel accepted the
+  message. Fully failed runs leave their events pending for the next run, so
+  nothing is lost; a partially failed run may repeat an event on the failed
+  channel's next successful report.
+- History pruning protects unreported events for each enabled report kind
+  (capped at 1000 per watch), so `history=1` cannot eat a pending digest.
+
+Inspect and test the reports without waiting for the clock:
+
+```bash
+dit report status                    # schedule, next run, last run and outcome
+dit report preview daily             # render the next daily report, send nothing
+dit report send weekly               # send now, exactly as the scheduler would
+```
 
 ---
 
@@ -230,6 +280,10 @@ dit notifications retry <id>
 dit flag list [--watch <id>]
 dit flag set <name> <value> [--watch <id>]
 dit flag unset <name> [--watch <id>]
+
+dit report status
+dit report preview <daily|weekly>
+dit report send <daily|weekly>
 ```
 
 `--tag` is repeatable and creates one watch per tag. Output defaults to aligned
@@ -267,6 +321,9 @@ in constant time. `GET /healthz` is unauthenticated.
 | POST | `/api/v1/notifications/{id}/retry` | Re-deliver a failed notification |
 | GET | `/api/v1/flags` | List flags; `watch` query adds per-watch and effective values |
 | PUT/DELETE | `/api/v1/flags/{name}` | Set a global flag (`{"value": …}`) / remove it |
+| GET | `/api/v1/reports` | Report schedule, next run and last-run outcome per kind |
+| GET | `/api/v1/reports/{kind}/preview` | Render the next daily/weekly report without sending |
+| POST | `/api/v1/reports/{kind}/send` | Send a report now |
 
 Flag writes take a scalar body, `{"value": <int|bool>}`. `DELETE` is idempotent
 (`204`); an unknown flag is `404`; an invalid or zero value is `422` carrying the

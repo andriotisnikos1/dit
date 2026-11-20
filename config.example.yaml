@@ -32,3 +32,10 @@ log_level: info
 # channels flagged is_default are used.
 # default_channels:
 #   - ops-ntfy
+
+# Daily and weekly reports. Leave a time unset to disable that report. Times are
+# in report_timezone (an IANA name; the server embeds the timezone database).
+# report_daily_at: "08:00"
+# report_weekly_at: "08:00"
+# report_weekly_day: mon
+# report_timezone: UTC
