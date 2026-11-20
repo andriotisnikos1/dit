@@ -170,10 +170,17 @@ func run() int {
 		engineErr <- engine.Run(ctx)
 	}()
 
-	reportErr := make(chan error, 1)
-	go func() {
-		reportErr <- engine.RunReporter(ctx)
-	}()
+	// The report scheduler is optional: with no report time configured its
+	// worker returns immediately, and a result on this channel would look
+	// like a shutdown. Leave the channel nil (a nil channel never fires in a
+	// select) unless a schedule is actually enabled.
+	var reportErr chan error
+	if schedule.Enabled(apitypes.ReportDaily) || schedule.Enabled(apitypes.ReportWeekly) {
+		reportErr = make(chan error, 1)
+		go func() {
+			reportErr <- engine.RunReporter(ctx)
+		}()
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {
